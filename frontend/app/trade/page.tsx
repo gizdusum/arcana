@@ -17,128 +17,217 @@ import {
   VAULT_ABI,
 } from '@/lib/contracts'
 import { formatMarket, timeAgo } from '@/lib/utils'
-import { AreaChart, Area, ResponsiveContainer, ReferenceLine, Tooltip } from 'recharts'
+import { ChevronDown, ChevronUp, ExternalLink, RefreshCw } from 'lucide-react'
 
-// Lazy-load the trading chart (client-only)
-const TradingChart = nextDynamic(
-  () => import('@/components/TradingChart').then((m) => m.TradingChart),
-  { ssr: false, loading: () => <div className="w-full h-full flex items-center justify-center"><span className="font-mono text-xs animate-pulse" style={{ color: 'var(--ink-3)' }}>Loading chart...</span></div> }
+const TVChart = nextDynamic(
+  () => import('@/components/TVChart').then((m) => m.TVChart),
+  { ssr: false, loading: () => <ChartLoader /> }
+)
+const OrderBook = nextDynamic(
+  () => import('@/components/OrderBook').then((m) => m.OrderBook),
+  { ssr: false, loading: () => <div className="w-full h-full flex items-center justify-center"><span className="font-mono text-2xs animate-pulse" style={{ color: 'var(--ink-3)' }}>Loading...</span></div> }
 )
 
-// ─── Types ─────────────────────────────────────────────────────────────────
+// ─── Types ──────────────────────────────────────────────────────────────────
 
-type Prices = { btc: number; eth: number; btcChg: number; ethChg: number }
+type Asset = 'ETH' | 'BTC'
+type Tab = 'positions' | 'history'
 
-function useLivePrices() {
-  const [prices, setPrices] = useState<Prices | null>(null)
-  const fetch_ = useCallback(async () => {
-    try {
-      const r = await fetch(
-        'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true'
-      )
-      const d = await r.json()
-      setPrices({
-        btc: d.bitcoin.usd,
-        eth: d.ethereum.usd,
-        btcChg: d.bitcoin.usd_24h_change ?? 0,
-        ethChg: d.ethereum.usd_24h_change ?? 0,
-      })
-    } catch {}
-  }, [])
-  useEffect(() => { fetch_(); const iv = setInterval(fetch_, 15_000); return () => clearInterval(iv) }, [fetch_])
-  return prices
+interface Ticker {
+  lastPrice: number
+  priceChange: number
+  priceChangePercent: number
+  highPrice: number
+  lowPrice: number
+  volume: number
+  quoteVolume: number
 }
 
-// ─── Market selector bar ───────────────────────────────────────────────────
+// ─── Loaders ────────────────────────────────────────────────────────────────
 
-function MarketBar({
-  selected,
+function ChartLoader() {
+  return (
+    <div
+      className="w-full h-full flex flex-col items-center justify-center gap-3"
+      style={{ background: 'var(--bg)' }}
+    >
+      <div className="h-8 w-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--arc)', borderTopColor: 'transparent' }} />
+      <span className="font-mono text-xs" style={{ color: 'var(--ink-3)' }}>Loading chart...</span>
+    </div>
+  )
+}
+
+// ─── 24h Ticker data (Binance REST) ─────────────────────────────────────────
+
+function useTicker(asset: Asset) {
+  const [ticker, setTicker] = useState<Ticker | null>(null)
+  const [prev, setPrev] = useState<number | null>(null)
+
+  const sym = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
+
+  const fetch_ = useCallback(async () => {
+    try {
+      const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym}`)
+      const d = await r.json()
+      setTicker({
+        lastPrice: parseFloat(d.lastPrice),
+        priceChange: parseFloat(d.priceChange),
+        priceChangePercent: parseFloat(d.priceChangePercent),
+        highPrice: parseFloat(d.highPrice),
+        lowPrice: parseFloat(d.lowPrice),
+        volume: parseFloat(d.volume),
+        quoteVolume: parseFloat(d.quoteVolume),
+      })
+    } catch {}
+  }, [sym])
+
+  useEffect(() => {
+    fetch_()
+    const iv = setInterval(fetch_, 5_000)
+    return () => clearInterval(iv)
+  }, [fetch_])
+
+  // Live price via WebSocket
+  useEffect(() => {
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym.toLowerCase()}@trade`)
+    ws.onmessage = (e) => {
+      try {
+        const d = JSON.parse(e.data)
+        const newPrice = parseFloat(d.p)
+        setTicker((prev_) => {
+          if (!prev_) return prev_
+          setPrev(prev_.lastPrice)
+          return { ...prev_, lastPrice: newPrice }
+        })
+      } catch {}
+    }
+    ws.onerror = () => ws.close()
+    return () => ws.close()
+  }, [sym])
+
+  return { ticker, prev }
+}
+
+// ─── Market header bar ────────────────────────────────────────────────────────
+
+function MarketHeader({
+  asset,
   onSelect,
-  prices,
 }: {
-  selected: 'BTC' | 'ETH'
-  onSelect: (a: 'BTC' | 'ETH') => void
-  prices: Prices | null
+  asset: Asset
+  onSelect: (a: Asset) => void
 }) {
-  const fmt = (n: number) =>
-    n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-  const sign = (n: number) => (n >= 0 ? '+' : '')
+  const { ticker, prev } = useTicker(asset)
+  const isUp = ticker && prev ? ticker.lastPrice >= prev : true
+  const isPositive = ticker ? ticker.priceChangePercent >= 0 : true
 
-  const markets: { sym: 'BTC' | 'ETH'; id: string }[] = [
-    { sym: 'BTC', id: 'bitcoin' },
-    { sym: 'ETH', id: 'ethereum' },
-  ]
+  const fmt = (n: number, dec = 2) =>
+    n.toLocaleString('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec })
+  const fmtVol = (n: number) => {
+    if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`
+    if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`
+    return `$${n.toFixed(0)}`
+  }
 
   return (
     <div
-      className="flex items-center gap-0 border-b shrink-0"
-      style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '52px' }}
+      className="flex items-center gap-0 border-b shrink-0 overflow-x-auto"
+      style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '52px', minHeight: '52px' }}
     >
-      {markets.map(({ sym }) => {
-        const price = sym === 'BTC' ? prices?.btc : prices?.eth
-        const chg = sym === 'BTC' ? prices?.btcChg : prices?.ethChg
-        const active = selected === sym
-        return (
-          <button
-            key={sym}
-            onClick={() => onSelect(sym)}
-            className="relative flex items-center gap-3 px-5 h-full border-r font-mono transition-all"
-            style={{
-              borderColor: 'var(--border)',
-              background: active ? 'var(--surface-2)' : 'transparent',
-            }}
-          >
-            {active && (
-              <span
-                className="absolute bottom-0 left-0 right-0 h-0.5"
-                style={{ background: 'var(--arc)' }}
-              />
-            )}
-            <div className="text-left">
-              <div className="text-sm font-medium" style={{ color: active ? 'var(--ink)' : 'var(--ink-2)' }}>
-                {sym}/USDC
+      {/* Market tabs */}
+      {(['ETH', 'BTC'] as Asset[]).map((a) => (
+        <button
+          key={a}
+          onClick={() => onSelect(a)}
+          className="flex items-center gap-2 px-4 h-full border-r font-mono text-xs transition-all shrink-0"
+          style={{
+            borderColor: 'var(--border)',
+            background: asset === a ? 'var(--surface-2)' : 'transparent',
+            color: asset === a ? 'var(--ink)' : 'var(--ink-2)',
+            position: 'relative',
+          }}
+        >
+          {asset === a && (
+            <span
+              className="absolute bottom-0 left-0 right-0 h-0.5"
+              style={{ background: 'var(--arc)' }}
+            />
+          )}
+          <span className="font-semibold">{a}-PERP</span>
+          <span style={{ color: 'var(--ink-3)', fontSize: '0.6rem' }}>USDC</span>
+        </button>
+      ))}
+
+      {/* Divider */}
+      <div className="h-6 w-px mx-2 shrink-0" style={{ background: 'var(--border-2)' }} />
+
+      {/* Price */}
+      <div className="px-3 shrink-0">
+        <div
+          className="font-mono text-lg font-medium tabular-nums transition-colors duration-200"
+          style={{
+            color: isUp ? 'var(--gain)' : 'var(--loss)',
+            textShadow: isUp ? '0 0 12px rgba(29,184,122,0.3)' : '0 0 12px rgba(201,78,78,0.3)',
+          }}
+        >
+          {ticker ? `$${fmt(ticker.lastPrice, asset === 'ETH' ? 2 : 1)}` : '—'}
+        </div>
+        <div
+          className="font-mono text-2xs"
+          style={{ color: isPositive ? 'var(--gain)' : 'var(--loss)' }}
+        >
+          {ticker
+            ? `${isPositive ? '+' : ''}${ticker.priceChangePercent.toFixed(2)}%`
+            : '—'}
+        </div>
+      </div>
+
+      {/* Stats */}
+      {ticker && (
+        <div className="flex items-center gap-6 px-4 overflow-x-auto">
+          {[
+            { label: '24h Change', value: `${ticker.priceChange >= 0 ? '+' : ''}$${fmt(ticker.priceChange)}`, color: isPositive ? 'var(--gain)' : 'var(--loss)' },
+            { label: '24h High', value: `$${fmt(ticker.highPrice, asset === 'ETH' ? 2 : 1)}`, color: 'var(--ink)' },
+            { label: '24h Low', value: `$${fmt(ticker.lowPrice, asset === 'ETH' ? 2 : 1)}`, color: 'var(--ink)' },
+            { label: '24h Volume', value: fmtVol(ticker.quoteVolume), color: 'var(--ink-2)' },
+          ].map((s) => (
+            <div key={s.label} className="shrink-0">
+              <div className="font-mono text-2xs uppercase tracking-widest mb-0.5" style={{ color: 'var(--ink-3)' }}>
+                {s.label}
               </div>
-              {price && (
-                <div className="flex items-center gap-1.5 text-2xs">
-                  <span style={{ color: 'var(--ink)' }}>${fmt(price)}</span>
-                  <span style={{ color: (chg ?? 0) >= 0 ? 'var(--gain)' : 'var(--loss)' }}>
-                    {sign(chg ?? 0)}{(chg ?? 0).toFixed(2)}%
-                  </span>
-                </div>
-              )}
+              <div className="font-mono text-xs tabular-nums" style={{ color: s.color }}>
+                {s.value}
+              </div>
             </div>
-          </button>
-        )
-      })}
+          ))}
+        </div>
+      )}
 
       <div className="flex-1" />
 
-      {/* Live indicator */}
-      <div className="flex items-center gap-2 px-5">
+      {/* Arc Testnet badge */}
+      <div className="flex items-center gap-1.5 px-4 shrink-0">
         <span className="h-1.5 w-1.5 rounded-full hermes-alive" style={{ background: 'var(--gain)' }} />
-        <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Live · 15s</span>
+        <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Arc Testnet</span>
       </div>
     </div>
   )
 }
 
-// ─── Position detail panel ─────────────────────────────────────────────────
+// ─── Position row ─────────────────────────────────────────────────────────────
 
-function PositionPanel({
+function PositionRow({
   positionId,
-  prices,
+  asset,
   onClose,
   isClosing,
 }: {
   positionId: bigint
-  prices: Prices | null
+  asset: Asset
   onClose: (id: bigint) => void
   isClosing: boolean
 }) {
-  const [priceHistory, setPriceHistory] = useState<{ t: number; price: number }[]>([])
-  const marketRef = useRef<string | null>(null)
-  const pricesRef = useRef(prices)
-  pricesRef.current = prices
+  const [currentPrice, setCurrentPrice] = useState<number | null>(null)
 
   const { data: pos, refetch: refetchPos } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
@@ -153,32 +242,29 @@ function PositionPanel({
     args: [positionId],
   })
 
+  // Subscribe to live price
   useEffect(() => {
-    if (pos) {
-      const [,, market] = pos
-      marketRef.current = formatMarket(market as `0x${string}`).split('/')[0] ?? 'ETH'
+    if (!pos) return
+    const [,, market] = pos
+    const mkt = formatMarket(market as `0x${string}`).split('/')[0]
+    const sym = mkt === 'BTC' ? 'btcusdt' : 'ethusdt'
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@miniTicker`)
+    ws.onmessage = (e) => {
+      try { setCurrentPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
     }
-  }, [pos])
+    ws.onerror = () => ws.close()
 
-  useEffect(() => {
-    if (!prices || !marketRef.current) return
-    const price = marketRef.current === 'BTC' ? prices.btc : prices.eth
-    setPriceHistory((prev) => [...prev.slice(-120), { t: Date.now(), price }])
-  }, [prices])
+    const refetchIv = setInterval(() => { refetchPos(); refetchPnl() }, 5_000)
+    return () => { ws.close(); clearInterval(refetchIv) }
+  }, [pos, refetchPos, refetchPnl])
 
-  useEffect(() => {
-    const iv = setInterval(() => {
-      refetchPos()
-      refetchPnl()
-      const p = pricesRef.current
-      if (!p || !marketRef.current) return
-      const price = marketRef.current === 'BTC' ? p.btc : p.eth
-      setPriceHistory((prev) => [...prev.slice(-120), { t: Date.now(), price }])
-    }, 5_000)
-    return () => clearInterval(iv)
-  }, [refetchPos, refetchPnl])
-
-  if (!pos) return null
+  if (!pos) return (
+    <tr>
+      <td colSpan={9} className="px-4 py-3">
+        <div className="h-3 w-32 rounded animate-pulse" style={{ background: 'var(--surface-2)' }} />
+      </td>
+    </tr>
+  )
 
   const [id, , market, isLong, size, entryPrice, leverage, collateral, openedAt, isOpen] = pos
   if (!isOpen) return null
@@ -186,254 +272,419 @@ function PositionPanel({
   const pnlNum = pnlRaw !== undefined ? Number(pnlRaw) / 1e6 : 0
   const collateralNum = Number(collateral) / 1e6
   const sizeNum = Number(size) / 1e6
-  const entryPriceNum = Number(entryPrice) / 1e8
+  const entryNum = Number(entryPrice) / 1e8
   const levNum = Number(leverage)
   const pnlPct = collateralNum > 0 ? (pnlNum / collateralNum) * 100 : 0
-  const isProfit = pnlNum >= 0
-  const dirColor = isLong ? 'var(--gain)' : 'var(--loss)'
-  const pnlColor = isProfit ? 'var(--gain)' : 'var(--loss)'
-  const marketStr = formatMarket(market as `0x${string}`)
-  const asset = marketStr.split('/')[0] ?? 'ETH'
-  const currentPrice = prices ? (asset === 'BTC' ? prices.btc : prices.eth) : null
   const liqBuffer = 1 / levNum
-  const liqPrice = isLong ? entryPriceNum * (1 - liqBuffer) : entryPriceNum * (1 + liqBuffer)
+  const liqPrice = isLong ? entryNum * (1 - liqBuffer) : entryNum * (1 + liqBuffer)
+  const marketStr = formatMarket(market as `0x${string}`)
+  const isProfit = pnlNum >= 0
+  const pnlColor = isProfit ? 'var(--gain)' : 'var(--loss)'
+  const dirColor = isLong ? 'var(--gain)' : 'var(--loss)'
 
-  const allPrices = priceHistory.map((p) => p.price)
-  const minP = allPrices.length ? Math.min(...allPrices, entryPriceNum) : entryPriceNum
-  const maxP = allPrices.length ? Math.max(...allPrices, entryPriceNum) : entryPriceNum
-  const pad = (maxP - minP) * 0.3 || entryPriceNum * 0.002
-  const yDomain: [number, number] = [minP - pad, maxP + pad]
-  const gradId = `grad-${positionId}`
+  const fmtP = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
 
   return (
-    <div
-      className="rounded-sm overflow-hidden"
-      style={{
-        border: `1px solid var(--border)`,
-        background: 'var(--surface)',
-        boxShadow: `0 2px 16px rgba(0,0,0,0.2)`,
-      }}
+    <tr
+      className="border-t transition-colors"
+      style={{ borderColor: 'var(--border)' }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
+      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
     >
-      {/* Position header */}
-      <div
-        className="flex items-center px-4 py-3 gap-3 border-b"
-        style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
-      >
+      {/* Market */}
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span
+            className="font-mono text-2xs px-1.5 py-0.5 rounded-sm font-bold"
+            style={{
+              color: dirColor,
+              background: isLong ? 'rgba(29,184,122,0.1)' : 'rgba(201,78,78,0.1)',
+              border: `1px solid ${isLong ? 'rgba(29,184,122,0.2)' : 'rgba(201,78,78,0.2)'}`,
+            }}
+          >
+            {isLong ? 'LONG' : 'SHORT'}
+          </span>
+          <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>{marketStr}</span>
+        </div>
+        <div className="font-mono text-2xs mt-0.5" style={{ color: 'var(--ink-3)' }}>#{id.toString()} · {timeAgo(Number(openedAt))}</div>
+      </td>
+
+      {/* Size */}
+      <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--ink)' }}>
+        ${sizeNum.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+      </td>
+
+      {/* Collateral */}
+      <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--ink-2)' }}>
+        ${collateralNum.toFixed(2)}
+      </td>
+
+      {/* Leverage */}
+      <td className="px-4 py-3">
         <span
-          className="font-mono text-xs font-bold px-2 py-0.5 rounded-sm"
-          style={{ color: dirColor, background: `${isLong ? 'rgba(29,184,122,' : 'rgba(201,78,78,'}0.12)`, border: `1px solid ${isLong ? 'rgba(29,184,122,' : 'rgba(201,78,78,'}0.25)` }}
+          className="font-mono text-2xs px-1.5 py-0.5 rounded-sm"
+          style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)', border: '1px solid rgba(110,95,240,0.2)' }}
         >
-          {isLong ? 'LONG' : 'SHORT'}
+          {levNum}×
         </span>
-        <span className="font-mono text-sm font-medium" style={{ color: 'var(--ink)' }}>{marketStr}</span>
-        <span className="font-mono text-2xs" style={{ color: 'var(--ink-2)' }}>{levNum}×</span>
-        <div className="flex-1" />
-        <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>#{id.toString()} · {timeAgo(Number(openedAt))}</span>
-      </div>
+      </td>
 
-      {/* P&L hero */}
-      <div className="px-4 pt-4 pb-2">
-        <div className="flex items-end justify-between mb-1">
-          <div>
-            <span
-              className="font-mono text-3xl font-light tabular-nums"
-              style={{ color: pnlColor, textShadow: `0 0 20px ${isProfit ? 'rgba(29,184,122,' : 'rgba(201,78,78,'}0.3)`, transition: 'color 0.3s' }}
-            >
-              {pnlNum >= 0 ? '+' : ''}${Math.abs(pnlNum).toFixed(2)}
-            </span>
-            <span className="font-mono text-sm ml-2 mb-0.5 inline-block" style={{ color: pnlColor, opacity: 0.7 }}>
-              {pnlNum >= 0 ? '+' : ''}{Math.abs(pnlPct).toFixed(2)}%
-            </span>
-          </div>
-          {currentPrice && (
-            <div className="text-right">
-              <div className="font-mono text-sm font-medium" style={{ color: 'var(--ink)' }}>
-                ${currentPrice.toLocaleString('en-US', { minimumFractionDigits: 2 })}
-              </div>
-              <div className="font-mono text-2xs" style={{ color: 'var(--ink-2)' }}>Current</div>
-            </div>
-          )}
+      {/* Entry Price */}
+      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: 'var(--ink-2)' }}>
+        {fmtP(entryNum)}
+      </td>
+
+      {/* Mark Price */}
+      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: 'var(--ink)' }}>
+        {currentPrice ? fmtP(currentPrice) : '—'}
+      </td>
+
+      {/* Liq Price */}
+      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: '#c94e4e', opacity: 0.8 }}>
+        {fmtP(liqPrice)}
+      </td>
+
+      {/* P&L */}
+      <td className="px-4 py-3">
+        <div className="font-mono text-xs font-medium tabular-nums" style={{ color: pnlColor }}>
+          {isProfit ? '+' : ''}${Math.abs(pnlNum).toFixed(2)}
         </div>
-        <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Unrealized P&L</span>
-      </div>
-
-      {/* Mini sparkline */}
-      <div className="px-4 pb-3 pt-1">
-        <div
-          className="rounded-sm overflow-hidden"
-          style={{ height: '72px', border: `1px solid var(--border)`, background: 'var(--bg)' }}
-        >
-          {priceHistory.length < 2 ? (
-            <div className="h-full flex items-center justify-center">
-              <span className="font-mono text-2xs animate-pulse" style={{ color: 'var(--ink-3)' }}>collecting data...</span>
-            </div>
-          ) : (
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={priceHistory} margin={{ top: 6, right: 0, bottom: 0, left: 0 }}>
-                <defs>
-                  <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor={isLong ? '#1db87a' : '#c94e4e'} stopOpacity={0.15} />
-                    <stop offset="95%" stopColor={isLong ? '#1db87a' : '#c94e4e'} stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <ReferenceLine
-                  y={entryPriceNum}
-                  stroke={isLong ? '#1db87a' : '#c94e4e'}
-                  strokeDasharray="3 3"
-                  strokeOpacity={0.4}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="price"
-                  stroke={isLong ? '#1db87a' : '#c94e4e'}
-                  strokeWidth={1.5}
-                  fill={`url(#${gradId})`}
-                  dot={false}
-                  isAnimationActive={false}
-                />
-                <Tooltip
-                  content={({ active, payload }) => {
-                    if (!active || !payload?.length) return null
-                    return (
-                      <div
-                        className="font-mono text-2xs px-2 py-1 rounded-sm"
-                        style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--ink)' }}
-                      >
-                        ${(payload[0].value as number).toLocaleString('en-US', { minimumFractionDigits: 2 })}
-                      </div>
-                    )
-                  }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          )}
+        <div className="font-mono text-2xs" style={{ color: pnlColor, opacity: 0.7 }}>
+          {isProfit ? '+' : ''}{Math.abs(pnlPct).toFixed(2)}%
         </div>
-        <div className="flex justify-between mt-1">
-          <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Entry ${entryPriceNum.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-          <span className="font-mono text-2xs" style={{ color: '#c94e4e', opacity: 0.7 }}>Liq. ${liqPrice.toLocaleString('en-US', { maximumFractionDigits: 0 })}</span>
-        </div>
-      </div>
+      </td>
 
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 gap-px mx-4 mb-4 rounded-sm overflow-hidden" style={{ background: 'var(--border)' }}>
-        {[
-          { label: 'Size', value: `$${sizeNum.toLocaleString('en-US', { maximumFractionDigits: 2 })}` },
-          { label: 'Collateral', value: `$${collateralNum.toFixed(2)}` },
-          { label: 'Entry Price', value: `$${entryPriceNum.toLocaleString('en-US', { maximumFractionDigits: 2 })}` },
-          { label: 'Liq. Price', value: `$${liqPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}`, color: '#c94e4e' },
-        ].map((m) => (
-          <div key={m.label} className="px-3 py-2.5" style={{ background: 'var(--surface)' }}>
-            <div className="font-mono text-2xs uppercase tracking-wider mb-0.5" style={{ color: 'var(--ink-3)' }}>{m.label}</div>
-            <div className="font-mono text-xs font-medium" style={{ color: m.color ?? 'var(--ink)' }}>{m.value}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Close button */}
-      <div className="px-4 pb-4">
+      {/* Close */}
+      <td className="px-4 py-3">
         <button
           onClick={() => onClose(positionId)}
           disabled={isClosing}
-          className="w-full font-mono text-xs py-2.5 rounded-sm transition-all disabled:opacity-40"
-          style={{ border: '1px solid rgba(201,78,78,0.3)', color: '#c94e4e', background: 'rgba(201,78,78,0.06)' }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.12)' }}
+          className="font-mono text-2xs px-3 py-1.5 rounded-sm transition-all disabled:opacity-40"
+          style={{
+            color: '#c94e4e',
+            border: '1px solid rgba(201,78,78,0.25)',
+            background: 'rgba(201,78,78,0.06)',
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.15)' }}
           onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.06)' }}
         >
-          {isClosing ? 'closing...' : 'Close Position'}
+          {isClosing ? '...' : 'Close'}
         </button>
-      </div>
-    </div>
+      </td>
+    </tr>
   )
 }
 
-// ─── No positions state ────────────────────────────────────────────────────
+// ─── Positions panel (bottom) ─────────────────────────────────────────────────
 
-function EmptyPanel() {
+function PositionsPanel({
+  tab,
+  onTabChange,
+  positionIds,
+  asset,
+  onClose,
+  closingId,
+  isLoading,
+  onRefresh,
+}: {
+  tab: Tab
+  onTabChange: (t: Tab) => void
+  positionIds: readonly bigint[]
+  asset: Asset
+  onClose: (id: bigint) => void
+  closingId: bigint | null
+  isLoading: boolean
+  onRefresh: () => void
+}) {
   return (
     <div
-      className="rounded-sm flex flex-col items-center justify-center py-16 text-center"
-      style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+      className="border-t flex flex-col"
+      style={{ borderColor: 'var(--border)', background: 'var(--surface)', minHeight: '200px', maxHeight: '280px' }}
     >
+      {/* Tab bar */}
       <div
-        className="h-12 w-12 rounded-full flex items-center justify-center mb-5"
-        style={{ background: 'rgba(110,95,240,0.08)', border: '1px solid rgba(110,95,240,0.15)' }}
+        className="flex items-center gap-0 border-b shrink-0"
+        style={{ borderColor: 'var(--border)', background: 'var(--surface-2)', height: '38px' }}
       >
-        <span className="font-mono text-lg" style={{ color: 'var(--arc)', opacity: 0.5 }}>∅</span>
+        {([['positions', 'Positions'], ['history', 'Trade History']] as [Tab, string][]).map(([t, label]) => (
+          <button
+            key={t}
+            onClick={() => onTabChange(t)}
+            className="relative px-4 h-full font-mono text-xs transition-all"
+            style={{
+              color: tab === t ? 'var(--ink)' : 'var(--ink-2)',
+              background: 'transparent',
+            }}
+          >
+            {tab === t && (
+              <span className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: 'var(--arc)' }} />
+            )}
+            {label}
+            {t === 'positions' && positionIds.length > 0 && (
+              <span
+                className="ml-1.5 font-mono text-2xs px-1 py-0.5 rounded-full"
+                style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)' }}
+              >
+                {positionIds.length}
+              </span>
+            )}
+          </button>
+        ))}
+        <div className="flex-1" />
+        <button
+          onClick={onRefresh}
+          className="px-3 h-full flex items-center gap-1.5 font-mono text-2xs transition-all"
+          style={{ color: 'var(--ink-3)' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--ink)' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--ink-3)' }}
+        >
+          <RefreshCw size={11} className={isLoading ? 'animate-spin' : ''} />
+          Refresh
+        </button>
+        <Link
+          href="/app"
+          className="px-3 h-full flex items-center gap-1.5 font-mono text-2xs border-l transition-all"
+          style={{ color: 'var(--arc)', borderColor: 'var(--border)' }}
+        >
+          + Open via ARCANA
+        </Link>
       </div>
-      <p className="font-mono text-sm mb-1" style={{ color: 'var(--ink-2)' }}>No open positions</p>
-      <p className="font-mono text-2xs mb-6" style={{ color: 'var(--ink-3)' }}>
-        Positions appear here when ARCANA opens a trade
-      </p>
-      <Link
-        href="/app"
-        className="font-mono text-xs border px-4 py-2 rounded-sm transition-all"
-        style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.2)' }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.06)' }}
-        onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-      >
-        Open new position →
-      </Link>
+
+      {/* Content */}
+      <div className="flex-1 overflow-auto">
+        {tab === 'positions' && (
+          positionIds.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full gap-2 py-8">
+              <span className="font-mono text-xs" style={{ color: 'var(--ink-2)' }}>No open positions</span>
+              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+                Use ARCANA agent to open positions on Arc Testnet
+              </span>
+              <Link
+                href="/app"
+                className="mt-2 font-mono text-2xs px-4 py-1.5 rounded-sm border transition-all"
+                style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.25)' }}
+              >
+                Open ARCANA →
+              </Link>
+            </div>
+          ) : (
+            <table className="w-full font-mono text-xs">
+              <thead className="sticky top-0" style={{ background: 'var(--surface)' }}>
+                <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                  {['Market / Side', 'Size', 'Collateral', 'Lev', 'Entry Price', 'Mark Price', 'Liq. Price', 'P&L', 'Action'].map((h) => (
+                    <th
+                      key={h}
+                      className="px-4 py-2 text-left font-normal"
+                      style={{ color: 'var(--ink-3)', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase' }}
+                    >
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {positionIds.map((id) => (
+                  <PositionRow
+                    key={id.toString()}
+                    positionId={id}
+                    asset={asset}
+                    onClose={onClose}
+                    isClosing={closingId === id}
+                  />
+                ))}
+              </tbody>
+            </table>
+          )
+        )}
+
+        {tab === 'history' && (
+          <div className="flex flex-col items-center justify-center h-full gap-2 py-8">
+            <span className="font-mono text-xs" style={{ color: 'var(--ink-2)' }}>Trade history coming soon</span>
+            <a
+              href="https://testnet.arcscan.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 font-mono text-2xs mt-1 transition-colors"
+              style={{ color: 'var(--arc)' }}
+            >
+              View on ArcScan <ExternalLink size={10} />
+            </a>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
 
-// ─── Agent status bar ──────────────────────────────────────────────────────
+// ─── ARCANA right panel ────────────────────────────────────────────────────────
 
-function AgentBar() {
-  const { data: activeStrategyIndex } = useReadContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'activeStrategy' })
-  const { data: totalTrades } = useReadContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'totalTradesExecuted' })
-  const { data: lastCycle } = useReadContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'lastHermesCycle' })
+function ArcanaPanel({ asset }: { asset: Asset }) {
+  const { data: activeStrategyIndex } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'activeStrategy',
+  })
+  const { data: totalAssets } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'totalAssets',
+  })
+  const { data: totalTrades } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'totalTradesExecuted',
+  })
+  const { data: lastCycle } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'lastHermesCycle',
+  })
 
   const NAMES = ['APOLLO', 'ATLAS', 'ARES'] as const
   const COLORS: Record<string, string> = { APOLLO: '#6e5ff0', ATLAS: '#3d9ac2', ARES: '#c94e4e' }
+  const RISK: Record<string, string> = { APOLLO: '3× Long', ATLAS: '5× L+S', ARES: '10× L+S' }
   const stratName = activeStrategyIndex !== undefined ? NAMES[Number(activeStrategyIndex)] : null
   const accent = stratName ? COLORS[stratName] : 'var(--hermes)'
+  const tvl = totalAssets ? (Number(totalAssets) / 1e6).toFixed(2) : '—'
+
+  const quickActions = [
+    { label: `Long ${asset} · 50 USDC`, msg: `long ${asset} 50 USDC`, color: 'var(--gain)' },
+    { label: `Long ${asset} · 100 USDC`, msg: `long ${asset} 100 USDC`, color: 'var(--gain)' },
+    { label: `Short ${asset} · 50 USDC`, msg: `short ${asset} 50 USDC`, color: 'var(--loss)' },
+    { label: 'Close all positions', msg: 'close all positions', color: 'var(--ink-2)' },
+  ]
 
   return (
     <div
-      className="flex items-center gap-3 px-4 py-2.5 border-b text-xs font-mono shrink-0"
-      style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+      className="flex flex-col h-full overflow-y-auto"
+      style={{ background: 'var(--surface)', borderLeft: '1px solid var(--border)' }}
     >
-      <span className="h-2 w-2 rounded-full hermes-alive" style={{ background: accent }} />
-      <span style={{ color: accent }}>ARCANA</span>
-      {stratName && (
-        <>
-          <span style={{ color: 'var(--border-2)' }}>·</span>
-          <span style={{ color: 'var(--ink)' }}>{stratName}</span>
-        </>
-      )}
-      {lastCycle && Number(lastCycle) > 0 && (
-        <>
-          <span style={{ color: 'var(--border-2)' }}>·</span>
-          <span style={{ color: 'var(--ink-2)' }}>Last cycle {timeAgo(Number(lastCycle))}</span>
-        </>
-      )}
-      {totalTrades !== undefined && (
-        <>
-          <span style={{ color: 'var(--border-2)' }}>·</span>
-          <span style={{ color: 'var(--ink-2)' }}>{totalTrades.toString()} trades</span>
-        </>
-      )}
-      <div className="flex-1" />
-      <Link href="/app" className="transition-colors" style={{ color: 'var(--ink-2)' }}
-        onMouseEnter={(e) => { (e.target as HTMLElement).style.color = 'var(--ink)' }}
-        onMouseLeave={(e) => { (e.target as HTMLElement).style.color = 'var(--ink-2)' }}
-      >
-        + New Position
-      </Link>
+      {/* Agent status */}
+      <div className="px-4 pt-4 pb-3 border-b" style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center gap-2 mb-3">
+          <span className="h-2 w-2 rounded-full hermes-alive" style={{ background: accent }} />
+          <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>ARCANA</span>
+          <span className="font-mono text-2xs" style={{ color: accent }}>Hermes 3</span>
+        </div>
+
+        {stratName && (
+          <div
+            className="flex items-center justify-between px-3 py-2 rounded-sm"
+            style={{ background: `${accent}10`, border: `1px solid ${accent}25` }}
+          >
+            <div>
+              <div className="font-mono text-2xs uppercase tracking-widest" style={{ color: accent, opacity: 0.7 }}>Active Strategy</div>
+              <div className="font-mono text-sm font-medium mt-0.5" style={{ color: accent }}>{stratName}</div>
+            </div>
+            <div>
+              <div className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>{RISK[stratName]}</div>
+              <Link
+                href="/agent"
+                className="font-mono text-2xs mt-0.5 block transition-colors"
+                style={{ color: accent }}
+              >
+                Change →
+              </Link>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Vault stats */}
+      <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
+        <div className="font-mono text-2xs uppercase tracking-widest mb-2.5" style={{ color: 'var(--ink-3)' }}>
+          Vault
+        </div>
+        <div className="space-y-2">
+          {[
+            { label: 'TVL', value: `$${tvl}` },
+            { label: 'Total Trades', value: totalTrades?.toString() ?? '—' },
+            { label: 'Last Cycle', value: lastCycle && Number(lastCycle) > 0 ? timeAgo(Number(lastCycle)) : '—' },
+          ].map((row) => (
+            <div key={row.label} className="flex items-center justify-between">
+              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>{row.label}</span>
+              <span className="font-mono text-xs" style={{ color: 'var(--ink)' }}>{row.value}</span>
+            </div>
+          ))}
+        </div>
+        <Link
+          href="/vault"
+          className="mt-3 w-full flex items-center justify-center gap-1.5 font-mono text-2xs py-2 rounded-sm border transition-all"
+          style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.2)', background: 'rgba(110,95,240,0.05)' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.1)' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.05)' }}
+        >
+          Manage Vault →
+        </Link>
+      </div>
+
+      {/* Quick actions */}
+      <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
+        <div className="font-mono text-2xs uppercase tracking-widest mb-2.5" style={{ color: 'var(--ink-3)' }}>
+          Quick Actions
+        </div>
+        <div className="space-y-2">
+          {quickActions.map((a) => (
+            <Link
+              key={a.msg}
+              href={`/app?msg=${encodeURIComponent(a.msg)}`}
+              className="w-full flex items-center justify-between px-3 py-2 rounded-sm font-mono text-2xs border transition-all"
+              style={{
+                color: a.color,
+                borderColor: `${a.color}20`,
+                background: `${a.color}08`,
+              }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = `${a.color}15` }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = `${a.color}08` }}
+            >
+              <span>{a.label}</span>
+              <span style={{ opacity: 0.5 }}>→</span>
+            </Link>
+          ))}
+        </div>
+      </div>
+
+      {/* Chat CTA */}
+      <div className="px-4 py-4">
+        <Link
+          href="/app"
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-sm font-mono text-xs tracking-widest uppercase transition-all"
+          style={{
+            background: 'var(--arc)',
+            color: '#fff',
+            boxShadow: '0 4px 16px rgba(110,95,240,0.3)',
+          }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
+        >
+          <span className="arc-alive inline-block h-1.5 w-1.5 rounded-full bg-white/60" />
+          Open ARCANA Agent
+        </Link>
+        <p className="font-mono text-2xs mt-2 text-center leading-relaxed" style={{ color: 'var(--ink-3)' }}>
+          ARCANA manages positions autonomously based on your chosen strategy
+        </p>
+      </div>
     </div>
   )
 }
 
-// ─── Page ──────────────────────────────────────────────────────────────────
+// ─── Page ──────────────────────────────────────────────────────────────────────
 
 export default function TradePage() {
   const { isConnected } = useAccount()
-  const prices = useLivePrices()
-  const [selectedAsset, setSelectedAsset] = useState<'BTC' | 'ETH'>('ETH')
+  const [asset, setAsset] = useState<Asset>('ETH')
+  const [tab, setTab] = useState<Tab>('positions')
   const [closingId, setClosingId] = useState<bigint | null>(null)
+  const [showOrderBook, setShowOrderBook] = useState(true)
 
-  const { data: positionIds, refetch: refetchPositions } = useReadContract({
+  const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSD' : 'BINANCE:BTCUSD'
+  const bncSymbol = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
+
+  const {
+    data: positionIds,
+    isLoading: posLoading,
+    refetch: refetchPositions,
+  } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
     functionName: 'getVaultOpenPositions',
@@ -453,240 +704,121 @@ export default function TradePage() {
     if (closeSuccess) { setClosingId(null); refetchPositions() }
   }, [closeSuccess, refetchPositions])
 
-  const handleClose = useCallback(async (positionId: bigint) => {
-    if (!VAULT_ADDRESS) return
-    setClosingId(positionId)
-    try {
-      writeContract({
-        address: VAULT_ADDRESS,
-        abi: VAULT_ABI,
-        functionName: 'closePosition' as never,
-        args: [positionId] as never,
-      })
-    } catch { setClosingId(null) }
-  }, [writeContract])
+  const handleClose = useCallback(
+    async (positionId: bigint) => {
+      if (!VAULT_ADDRESS) return
+      setClosingId(positionId)
+      try {
+        writeContract({
+          address: VAULT_ADDRESS,
+          abi: VAULT_ABI,
+          functionName: 'closePosition' as never,
+          args: [positionId] as never,
+        })
+      } catch { setClosingId(null) }
+    },
+    [writeContract]
+  )
 
   const ids = positionIds ?? []
 
   if (!isConnected) {
     return (
-      <div className="mx-auto max-w-7xl px-4 py-8">
+      <div
+        className="flex flex-col items-center justify-center min-h-[60vh] mx-auto max-w-md gap-6 px-4"
+      >
         <div
-          className="flex flex-col items-center justify-center min-h-[400px] rounded-sm border"
-          style={{ background: 'var(--surface)', borderColor: 'var(--border)' }}
+          className="h-16 w-16 rounded-full flex items-center justify-center"
+          style={{ background: 'rgba(110,95,240,0.08)', border: '1px solid rgba(110,95,240,0.2)' }}
         >
-          <p className="font-mono text-sm mb-1" style={{ color: 'var(--ink-2)' }}>Connect wallet to view positions</p>
-          <p className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Your open trades appear here in real-time</p>
+          <span className="font-mono text-2xl" style={{ color: 'var(--arc)', opacity: 0.6 }}>◉</span>
+        </div>
+        <div className="text-center">
+          <p className="font-mono text-sm font-medium mb-1" style={{ color: 'var(--ink)' }}>Connect your wallet</p>
+          <p className="font-mono text-xs" style={{ color: 'var(--ink-3)' }}>
+            Connect to Arc Testnet to view positions and interact with ARCANA
+          </p>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col" style={{ height: 'calc(100vh - 56px)', overflow: 'hidden' }}>
-      <AgentBar />
-      <MarketBar selected={selectedAsset} onSelect={setSelectedAsset} prices={prices} />
+    <div
+      className="flex flex-col"
+      style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--bg)' }}
+    >
+      {/* Market header */}
+      <MarketHeader asset={asset} onSelect={setAsset} />
 
-      {/* Main exchange layout */}
+      {/* Main exchange area */}
       <div className="flex flex-1 min-h-0 overflow-hidden">
-        {/* Chart area */}
-        <div className="flex-1 flex flex-col min-w-0">
-          {/* Chart */}
-          <div className="flex-1 min-h-0 relative" style={{ background: 'var(--bg)' }}>
-            <TradingChart
-              asset={selectedAsset}
-              accent="var(--arc)"
-            />
+
+        {/* Order book (collapsible) */}
+        {showOrderBook && (
+          <div
+            className="border-r shrink-0"
+            style={{ width: '200px', borderColor: 'var(--border)', overflow: 'hidden' }}
+          >
+            <OrderBook symbol={bncSymbol as 'ETHUSDT' | 'BTCUSDT'} />
+          </div>
+        )}
+
+        {/* Chart */}
+        <div className="flex flex-col flex-1 min-w-0">
+          {/* Chart toolbar */}
+          <div
+            className="flex items-center gap-3 px-3 py-1.5 border-b shrink-0"
+            style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '36px' }}
+          >
+            <button
+              onClick={() => setShowOrderBook((v) => !v)}
+              className="flex items-center gap-1.5 font-mono text-2xs px-2 py-1 rounded-sm border transition-all"
+              style={{
+                color: showOrderBook ? 'var(--arc)' : 'var(--ink-3)',
+                borderColor: showOrderBook ? 'rgba(110,95,240,0.25)' : 'var(--border)',
+                background: showOrderBook ? 'rgba(110,95,240,0.06)' : 'transparent',
+              }}
+            >
+              {showOrderBook ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
+              Order Book
+            </button>
+            <div className="h-3 w-px" style={{ background: 'var(--border)' }} />
+            <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+              {tvSymbol} · TradingView
+            </span>
+            <div className="flex-1" />
+            <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+              {ids.length} position{ids.length !== 1 ? 's' : ''} open
+            </span>
           </div>
 
-          {/* Bottom: positions table */}
-          <div
-            className="border-t"
-            style={{ borderColor: 'var(--border)', background: 'var(--surface)', height: '220px', overflow: 'auto' }}
-          >
-            {/* Table header */}
-            <div
-              className="flex items-center px-4 py-2.5 border-b gap-4 sticky top-0 z-10"
-              style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
-            >
-              <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>
-                Open Positions
-              </span>
-              {ids.length > 0 && (
-                <span
-                  className="font-mono text-2xs px-1.5 py-0.5 rounded-full"
-                  style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)' }}
-                >
-                  {ids.length}
-                </span>
-              )}
-              <div className="flex-1" />
-              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
-                P&L updates every 5s
-              </span>
-            </div>
-
-            {ids.length === 0 ? (
-              <div className="flex items-center justify-center h-28">
-                <p className="font-mono text-xs" style={{ color: 'var(--ink-3)' }}>No open positions</p>
-              </div>
-            ) : (
-              <table className="w-full font-mono text-xs">
-                <thead>
-                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                    {['Market', 'Side', 'Size', 'Entry Price', 'Lev', 'P&L', 'Action'].map((h) => (
-                      <th
-                        key={h}
-                        className="px-4 py-2 text-left"
-                        style={{ color: 'var(--ink-3)', fontWeight: 400, letterSpacing: '0.08em', textTransform: 'uppercase', fontSize: '0.6rem' }}
-                      >
-                        {h}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {ids.map((id) => (
-                    <PositionRow
-                      key={id.toString()}
-                      positionId={id}
-                      prices={prices}
-                      onClose={handleClose}
-                      isClosing={closingId === id}
-                    />
-                  ))}
-                </tbody>
-              </table>
-            )}
+          {/* TradingView chart */}
+          <div className="flex-1 min-h-0">
+            <TVChart symbol={tvSymbol} interval="15" />
           </div>
         </div>
 
-        {/* Right panel: position details */}
+        {/* ARCANA panel */}
         <div
-          className="border-l overflow-y-auto"
-          style={{
-            width: '300px',
-            minWidth: '280px',
-            borderColor: 'var(--border)',
-            background: 'var(--surface)',
-          }}
+          className="shrink-0 overflow-y-auto"
+          style={{ width: '260px', borderLeft: '1px solid var(--border)' }}
         >
-          {/* Panel header */}
-          <div
-            className="px-4 py-3 border-b sticky top-0 z-10"
-            style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
-          >
-            <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>Positions</span>
-          </div>
-
-          <div className="p-3 space-y-3">
-            {ids.length === 0 ? (
-              <EmptyPanel />
-            ) : (
-              ids.map((id) => (
-                <PositionPanel
-                  key={id.toString()}
-                  positionId={id}
-                  prices={prices}
-                  onClose={handleClose}
-                  isClosing={closingId === id}
-                />
-              ))
-            )}
-          </div>
-
-          {/* Footer note */}
-          <div className="px-4 pb-4 pt-2">
-            <p className="font-mono text-2xs leading-relaxed" style={{ color: 'var(--ink-3)' }}>
-              Positions managed autonomously by ARCANA. P&L is unrealized at current oracle price. Liquidation prices are estimates.
-            </p>
-          </div>
+          <ArcanaPanel asset={asset} />
         </div>
       </div>
+
+      {/* Positions panel */}
+      <PositionsPanel
+        tab={tab}
+        onTabChange={setTab}
+        positionIds={ids}
+        asset={asset}
+        onClose={handleClose}
+        closingId={closingId}
+        isLoading={posLoading}
+        onRefresh={refetchPositions}
+      />
     </div>
-  )
-}
-
-// ─── Inline position row (table) ───────────────────────────────────────────
-
-function PositionRow({
-  positionId,
-  prices,
-  onClose,
-  isClosing,
-}: {
-  positionId: bigint
-  prices: Prices | null
-  onClose: (id: bigint) => void
-  isClosing: boolean
-}) {
-  const { data: pos } = useReadContract({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    functionName: 'positions',
-    args: [positionId],
-  })
-  const { data: pnl } = useReadContract({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    functionName: 'getUnrealizedPnL',
-    args: [positionId],
-  })
-
-  if (!pos) return null
-
-  const [, , market, isLong, size, entryPrice, leverage, collateral, , isOpen] = pos
-  if (!isOpen) return null
-
-  const pnlNum = pnl !== undefined ? Number(pnl) / 1e6 : 0
-  const pnlPct = Number(collateral) > 0 ? ((pnlNum / (Number(collateral) / 1e6)) * 100).toFixed(2) : '0.00'
-  const sizeNum = (Number(size) / 1e6).toFixed(2)
-  const entryNum = Number(entryPrice) / 1e8
-  const levNum = Number(leverage)
-
-  return (
-    <tr
-      className="border-t transition-colors"
-      style={{ borderColor: 'var(--border)' }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
-      onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
-    >
-      <td className="px-4 py-2.5" style={{ color: 'var(--ink)' }}>{formatMarket(market as `0x${string}`)}</td>
-      <td className="px-4 py-2.5">
-        <span
-          className="font-mono text-2xs px-1.5 py-0.5 rounded-sm"
-          style={{
-            color: isLong ? 'var(--gain)' : 'var(--loss)',
-            background: isLong ? 'rgba(29,184,122,0.1)' : 'rgba(201,78,78,0.1)',
-            border: `1px solid ${isLong ? 'rgba(29,184,122,0.2)' : 'rgba(201,78,78,0.2)'}`,
-          }}
-        >
-          {isLong ? 'LONG' : 'SHORT'}
-        </span>
-      </td>
-      <td className="px-4 py-2.5" style={{ color: 'var(--ink)' }}>${sizeNum}</td>
-      <td className="px-4 py-2.5" style={{ color: 'var(--ink-2)' }}>
-        ${entryNum.toLocaleString('en-US', { maximumFractionDigits: 2 })}
-      </td>
-      <td className="px-4 py-2.5" style={{ color: 'var(--ink-2)' }}>{levNum}×</td>
-      <td className="px-4 py-2.5">
-        <span style={{ color: pnlNum >= 0 ? 'var(--gain)' : 'var(--loss)' }}>
-          {pnlNum >= 0 ? '+' : ''}${Math.abs(pnlNum).toFixed(2)}
-          <span className="ml-1 opacity-60" style={{ color: 'var(--ink-3)' }}>
-            ({pnlNum >= 0 ? '+' : ''}{pnlPct}%)
-          </span>
-        </span>
-      </td>
-      <td className="px-4 py-2.5">
-        <button
-          onClick={() => onClose(positionId)}
-          disabled={isClosing}
-          className="font-mono text-2xs px-2.5 py-1 rounded-sm transition-all disabled:opacity-40"
-          style={{ color: '#c94e4e', border: '1px solid rgba(201,78,78,0.25)', background: 'rgba(201,78,78,0.06)' }}
-        >
-          {isClosing ? '...' : 'Close'}
-        </button>
-      </td>
-    </tr>
   )
 }
