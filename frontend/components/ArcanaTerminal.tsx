@@ -35,6 +35,10 @@ type Message = {
   pending?: boolean
 }
 
+type ConfirmPending = { msgId: string; proposal: Proposal } | null
+
+// ─── Strategy definitions ─────────────────────────────────────────────────────
+
 const STRATS: {
   id: Strategy
   label: string
@@ -44,6 +48,9 @@ const STRATS: {
   maxLev: string
   direction: string
   riskLevel: number
+  personality: string
+  greeting: string
+  riskNote: string
 }[] = [
   {
     id: 'APOLLO',
@@ -54,6 +61,10 @@ const STRATS: {
     maxLev: '3×',
     direction: 'Long only',
     riskLevel: 1,
+    personality: 'Measured · Methodical · Capital-first',
+    riskNote: 'Conservative · Max 3× · Long only · Stop-loss 5%',
+    greeting:
+      `Reconnaissance complete. APOLLO online.\n\nMy mandate is singular: grow the vault steadily while protecting the downside at all costs. I trade longs only, maximum 3× leverage. I don't chase momentum. I look for setups where probability already tilts in our favor before a single dollar is risked.\n\nRisk parameters: Stop-loss 5%, take-profit 10%. I walk away from marginal setups — there will always be a cleaner entry.\n\nWhat's our available capital and current market focus?`,
   },
   {
     id: 'ATLAS',
@@ -64,6 +75,10 @@ const STRATS: {
     maxLev: '5×',
     direction: 'Long + Short',
     riskLevel: 3,
+    personality: 'Analytical · Adaptive · Bi-directional',
+    riskNote: 'Balanced · Max 5× · Long + Short · Stop-loss 10%',
+    greeting:
+      `ATLAS online. Systems nominal.\n\nI operate across both sides of the market — I go long when structure supports it, short when it breaks down. Neither direction intimidates me; both are opportunities. 5× maximum leverage, balanced exposure across positions.\n\nI synthesize on-chain signals, price structure, and macro context before positioning. No single factor decides a trade.\n\nRisk parameters: Stop-loss 10%, take-profit 20%.\n\nReady to analyze. State the target market.`,
   },
   {
     id: 'ARES',
@@ -74,6 +89,10 @@ const STRATS: {
     maxLev: '10×',
     direction: 'Long + Short',
     riskLevel: 5,
+    personality: 'Aggressive · Decisive · High-conviction',
+    riskNote: 'High risk · Max 10× · Long + Short · Stop-loss 20%',
+    greeting:
+      `ARES active.\n\nNo warmup. No preamble.\n\nWhen my signal fires, I move with full conviction — 10× leverage, no hesitation. I trade longs and shorts with equal aggression. Markets are not won by the careful; they are won by those who strike decisively when the edge is clear.\n\nHigh volatility is expected. That is not a warning — it is the environment I was built for.\n\nRisk parameters: Stop-loss 20%, take-profit 50%.\n\nState the target. We move immediately.`,
   },
 ]
 
@@ -124,7 +143,7 @@ function Sidebar({
   const { data: totalTrades } = useReadContract({ address: VAULT_ADDRESS, abi: VAULT_ABI, functionName: 'totalTradesExecuted' })
 
   const tvl = totalAssets ? `$${(Number(totalAssets) / 1e6).toFixed(2)}` : '—'
-  const stratAccent = selectedStrategy ? STRATS.find((s) => s.id === selectedStrategy)?.accent : 'var(--hermes)'
+  const strat = selectedStrategy ? STRATS.find((s) => s.id === selectedStrategy) : null
 
   return (
     <aside
@@ -175,7 +194,7 @@ function Sidebar({
         <span className="label block">Vault</span>
         {[
           { label: 'TVL', value: tvl },
-          { label: 'Strategy', value: selectedStrategy ?? '—', color: stratAccent },
+          { label: 'Strategy', value: selectedStrategy ?? '—', color: strat?.accent },
           { label: 'Trades', value: totalTrades !== undefined ? totalTrades.toString() : '—' },
         ].map((row) => (
           <div key={row.label} className="flex justify-between items-center">
@@ -190,6 +209,23 @@ function Sidebar({
           </div>
         )}
       </div>
+
+      {/* Agent personality */}
+      {strat && (
+        <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
+          <div
+            className="px-2.5 py-2 rounded-sm"
+            style={{ background: `${strat.accent}08`, border: `1px solid ${strat.accent}20` }}
+          >
+            <div className="font-mono text-2xs uppercase tracking-widest mb-1" style={{ color: strat.accent, opacity: 0.7 }}>
+              {strat.id}
+            </div>
+            <div className="font-mono text-2xs leading-snug" style={{ color: 'var(--ink-3)' }}>
+              {strat.personality}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Nav */}
       <div className="px-4 py-4 border-b space-y-1" style={{ borderColor: 'var(--border)' }}>
@@ -243,6 +279,196 @@ function Sidebar({
   )
 }
 
+// ─── Trade confirmation modal ─────────────────────────────────────────────────
+
+function TradeConfirmModal({
+  proposal,
+  strategy,
+  prices,
+  onConfirm,
+  onCancel,
+  isExecuting,
+}: {
+  proposal: Proposal
+  strategy: Strategy | null
+  prices: Prices | null
+  onConfirm: () => void
+  onCancel: () => void
+  isExecuting: boolean
+}) {
+  const strat = STRATS.find((s) => s.id === strategy)
+  const accent = strat?.accent ?? 'var(--arc)'
+  const isLong = proposal.direction === 'long'
+  const dirColor = isLong ? 'var(--gain)' : 'var(--loss)'
+  const dirLabel = (proposal.direction ?? 'long').toUpperCase()
+
+  const currentPrice = proposal.asset === 'BTC' ? prices?.btc : prices?.eth
+  const lev = proposal.leverage ?? 1
+  const liqBuffer = 1 / lev
+  const estEntry = currentPrice
+    ? `$${currentPrice.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+    : '—'
+  const estLiq = currentPrice
+    ? `$${(isLong
+        ? currentPrice * (1 - liqBuffer)
+        : currentPrice * (1 + liqBuffer)
+      ).toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+    : '—'
+
+  // Trap keyboard: Escape = cancel, Enter = confirm
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Enter' && !isExecuting) onConfirm()
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [onCancel, onConfirm, isExecuting])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div
+        className="w-full max-w-md rounded-sm overflow-hidden"
+        style={{
+          background: 'var(--surface)',
+          border: `1px solid ${accent}35`,
+          boxShadow: `0 0 80px ${accent}18, 0 24px 48px rgba(0,0,0,0.5)`,
+        }}
+      >
+        {/* Header */}
+        <div
+          className="flex items-center gap-3 px-5 py-4 border-b"
+          style={{ borderColor: `${accent}20`, background: `${accent}08` }}
+        >
+          <span className="h-2 w-2 rounded-full hermes-alive" style={{ background: accent }} />
+          <span
+            className="font-mono text-xs font-medium tracking-widest uppercase flex-1"
+            style={{ color: accent }}
+          >
+            {strategy} · Confirm Trade
+          </span>
+          <button
+            onClick={onCancel}
+            className="font-mono text-sm"
+            style={{ color: 'var(--ink-3)', lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div className="px-5 py-5">
+          {/* Direction + Asset */}
+          <div className="flex items-center gap-3 mb-5">
+            <span
+              className="font-mono text-3xl font-light tracking-widest"
+              style={{ color: dirColor }}
+            >
+              {dirLabel}
+            </span>
+            <span className="font-mono text-3xl font-light" style={{ color: 'var(--ink)' }}>
+              {proposal.asset}
+            </span>
+            {proposal.leverage && (
+              <span
+                className="font-mono text-sm px-2 py-1 rounded-sm self-center"
+                style={{
+                  color: accent,
+                  background: `${accent}12`,
+                  border: `1px solid ${accent}28`,
+                }}
+              >
+                {proposal.leverage}×
+              </span>
+            )}
+          </div>
+
+          {/* Details */}
+          <div
+            className="space-y-2.5 p-3.5 rounded-sm mb-4"
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+          >
+            {[
+              { label: 'Size',             value: `$${(proposal.size_usdc ?? 0).toLocaleString()}`, color: 'var(--ink)' },
+              { label: 'Leverage',         value: `${proposal.leverage ?? 1}×`,                    color: accent },
+              { label: 'Est. Entry',       value: estEntry,                                         color: 'var(--ink)' },
+              { label: 'Est. Liquidation', value: estLiq,                                           color: '#e05555' },
+              { label: 'Strategy',         value: strategy ?? '—',                                  color: accent },
+            ].map((row) => (
+              <div key={row.label} className="flex items-center justify-between">
+                <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+                  {row.label}
+                </span>
+                <span className="font-mono text-xs tabular-nums font-medium" style={{ color: row.color }}>
+                  {row.value}
+                </span>
+              </div>
+            ))}
+          </div>
+
+          {/* Agent reasoning */}
+          <p
+            className="font-mono text-2xs leading-relaxed mb-4"
+            style={{
+              color: 'var(--ink-2)',
+              borderLeft: `2px solid ${accent}35`,
+              paddingLeft: '10px',
+            }}
+          >
+            {proposal.reasoning}
+          </p>
+
+          {/* Risk note */}
+          <div
+            className="flex items-start gap-2 px-3 py-2.5 rounded-sm mb-5"
+            style={{ background: 'rgba(201,78,78,0.05)', border: '1px solid rgba(201,78,78,0.15)' }}
+          >
+            <span className="font-mono text-xs shrink-0" style={{ color: '#c94e4e' }}>⚠</span>
+            <span className="font-mono text-2xs leading-relaxed" style={{ color: '#e05555', opacity: 0.85 }}>
+              {strat?.riskNote}. Ensure you understand the liquidation risk before signing.
+            </span>
+          </div>
+
+          {/* Buttons */}
+          <div className="flex gap-3">
+            <button
+              onClick={onConfirm}
+              disabled={isExecuting}
+              className="flex-1 font-mono text-sm py-3 rounded-sm tracking-widest uppercase transition-all disabled:opacity-40"
+              style={{
+                background: `${accent}18`,
+                color: accent,
+                border: `1px solid ${accent}35`,
+              }}
+              onMouseEnter={(e) => { if (!isExecuting) (e.currentTarget as HTMLElement).style.background = `${accent}28` }}
+              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = `${accent}18` }}
+            >
+              {isExecuting ? '· Signing ·' : `Execute ${dirLabel}`}
+            </button>
+            <button
+              onClick={onCancel}
+              disabled={isExecuting}
+              className="font-mono text-sm px-6 py-3 rounded-sm transition-colors disabled:opacity-40"
+              style={{ border: '1px solid var(--border)', color: 'var(--ink-3)' }}
+            >
+              Cancel
+            </button>
+          </div>
+          <p
+            className="font-mono text-2xs text-center mt-3"
+            style={{ color: 'var(--ink-3)', opacity: 0.5 }}
+          >
+            Enter to confirm · Esc to cancel
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ─── Proposal card ────────────────────────────────────────────────────────────
 
 function ProposalCard({
@@ -257,17 +483,13 @@ function ProposalCard({
   executing: boolean
 }) {
   const dirColor = proposal.direction === 'long' ? 'var(--gain)' : 'var(--loss)'
-  const accentMap: Record<string, string> = {
-    APOLLO: '#6e5ff0',
-    ATLAS: '#3d9ac2',
-    ARES: '#c94e4e',
-  }
+  const accentMap: Record<string, string> = { APOLLO: '#6e5ff0', ATLAS: '#3d9ac2', ARES: '#c94e4e' }
   const accent =
-    proposal.action === 'open_position' ? dirColor :
-    proposal.action === 'close_position' ? 'var(--loss)' :
-    proposal.strategy ? accentMap[proposal.strategy] :
-    proposal.action === 'deposit' ? 'var(--gain)' :
-    proposal.action === 'withdraw' ? 'var(--loss)' : 'var(--arc)'
+    proposal.action === 'open_position'   ? dirColor :
+    proposal.action === 'close_position'  ? 'var(--loss)' :
+    proposal.strategy                     ? accentMap[proposal.strategy] :
+    proposal.action === 'deposit'         ? 'var(--gain)' :
+    proposal.action === 'withdraw'        ? 'var(--loss)' : 'var(--arc)'
 
   const label =
     proposal.action === 'deposit'         ? `Deposit $${proposal.amount_usdc}` :
@@ -302,7 +524,7 @@ function ProposalCard({
             className="font-mono text-2xs px-3 py-1.5 rounded-sm transition-all disabled:opacity-40"
             style={{ background: `${accent}12`, color: accent, border: `1px solid ${accent}25` }}
           >
-            {executing ? 'signing...' : 'approve'}
+            {executing ? 'signing...' : 'review & approve'}
           </button>
           <button
             onClick={onDecline}
@@ -325,7 +547,6 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
 
   return (
     <div className="flex flex-col items-center justify-center h-full px-6 py-10">
-      {/* Title */}
       <div className="text-center mb-12">
         <div
           className="font-mono font-light tracking-[0.4em] mb-3"
@@ -345,17 +566,13 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
         </p>
       </div>
 
-      {/* Strategy cards */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 w-full max-w-2xl">
         {STRATS.map((s) => (
           <button
             key={s.id}
             onClick={() => onSelect(s.id)}
-            className="strategy-card rounded-sm p-5 text-left flex flex-col gap-3 group"
-            style={{
-              background: 'var(--surface)',
-              border: `1px solid ${s.accent}25`,
-            }}
+            className="strategy-card rounded-sm p-5 text-left flex flex-col gap-3"
+            style={{ background: 'var(--surface)', border: `1px solid ${s.accent}25` }}
             onMouseEnter={(e) => {
               const el = e.currentTarget
               el.style.boxShadow = `0 0 24px ${s.accent}20, 0 0 0 1px ${s.accent}35`
@@ -369,10 +586,8 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
               el.style.transform = 'translateY(0)'
             }}
           >
-            {/* Top bar */}
             <div className="h-0.5 w-full rounded-full -mt-5 -mx-5 mb-1" style={{ background: s.accent, width: 'calc(100% + 2.5rem)' }} />
 
-            {/* Name */}
             <div>
               <span className="font-mono text-2xs uppercase tracking-widest block mb-1" style={{ color: s.accent, opacity: 0.8 }}>
                 {s.label}
@@ -382,7 +597,6 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
               </span>
             </div>
 
-            {/* Risk dots */}
             <div className="flex gap-1">
               {Array.from({ length: 5 }).map((_, i) => (
                 <div
@@ -393,7 +607,6 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
               ))}
             </div>
 
-            {/* Stats */}
             <div className="space-y-1.5">
               <div className="flex justify-between">
                 <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Leverage</span>
@@ -405,14 +618,12 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
               </div>
             </div>
 
-            {/* Tagline */}
             <p className="font-mono text-2xs leading-snug" style={{ color: 'var(--ink-2)', opacity: 0.7 }}>
               {s.tagline}
             </p>
 
-            {/* Select CTA */}
             <div
-              className="mt-1 text-center font-mono text-2xs tracking-widest uppercase py-1.5 rounded-sm transition-all"
+              className="mt-1 text-center font-mono text-2xs tracking-widest uppercase py-1.5 rounded-sm"
               style={{ color: s.accent, background: `${s.accent}10`, border: `1px solid ${s.accent}20` }}
             >
               Select
@@ -439,6 +650,7 @@ export function ArcanaTerminal() {
   const [loading, setLoading] = useState(false)
   const [executingId, setExecutingId] = useState<string | null>(null)
   const [started, setStarted] = useState(false)
+  const [confirmPending, setConfirmPending] = useState<ConfirmPending>(null)
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -454,13 +666,21 @@ export function ArcanaTerminal() {
   }, [])
 
   const selectStrategy = (s: Strategy) => {
+    const strat = STRATS.find((st) => st.id === s)!
     setSelectedStrategy(s)
     setStarted(true)
-    setMessages([{
-      id: 'init',
-      role: 'system',
-      content: `${s} strategy active. Ask me to open positions, check your balance, or manage the vault.`,
-    }])
+    setMessages([
+      {
+        id: 'init',
+        role: 'system',
+        content: `${s} strategy active.`,
+      },
+      {
+        id: 'greeting',
+        role: 'assistant',
+        content: strat.greeting,
+      },
+    ])
     setTimeout(() => textareaRef.current?.focus(), 100)
   }
 
@@ -542,6 +762,17 @@ export function ArcanaTerminal() {
     }
   }
 
+  const handleApprove = (msgId: string, proposal: Proposal) => {
+    setConfirmPending({ msgId, proposal })
+  }
+
+  const handleConfirm = async () => {
+    if (!confirmPending) return
+    const { msgId, proposal } = confirmPending
+    setConfirmPending(null)
+    await executeProposal(msgId, proposal)
+  }
+
   const sendMessage = async () => {
     const text = input.trim()
     if (!text || loading) return
@@ -614,193 +845,221 @@ export function ArcanaTerminal() {
     }
   }
 
+  const activeStrat = STRATS.find((s) => s.id === selectedStrategy)
+
   // ── Render ────────────────────────────────────────────────────────────────
 
   return (
-    <div
-      className="flex"
-      style={{ height: 'calc(100vh - 56px)', minHeight: '520px', overflow: 'hidden' }}
-    >
-      <Sidebar prices={prices} selectedStrategy={selectedStrategy} />
+    <>
+      {/* Trade confirmation modal */}
+      {confirmPending && (
+        <TradeConfirmModal
+          proposal={confirmPending.proposal}
+          strategy={selectedStrategy}
+          prices={prices}
+          onConfirm={handleConfirm}
+          onCancel={() => setConfirmPending(null)}
+          isExecuting={executingId !== null}
+        />
+      )}
 
-      {/* Main area */}
-      <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+      <div
+        className="flex"
+        style={{ height: 'calc(100vh - 56px)', minHeight: '520px', overflow: 'hidden' }}
+      >
+        <Sidebar prices={prices} selectedStrategy={selectedStrategy} />
 
-        {/* Strategy tabs */}
-        <div
-          className="flex items-center gap-0 border-b shrink-0"
-          style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}
-        >
-          <div className="flex items-center">
-            {STRATS.map((s) => {
-              const active = selectedStrategy === s.id
-              return (
-                <button
-                  key={s.id}
-                  onClick={() => selectStrategy(s.id)}
-                  className="relative px-5 py-3 font-mono text-xs transition-all border-r"
-                  style={{
-                    borderColor: 'var(--border)',
-                    color: active ? s.accent : 'var(--ink-3)',
-                    background: active ? `${s.accent}08` : 'transparent',
-                  }}
-                >
-                  {active && (
-                    <span className="absolute bottom-0 left-0 right-0 h-px" style={{ background: s.accent }} />
-                  )}
-                  <span className="font-medium">{s.id}</span>
-                  <span className="ml-2 text-2xs opacity-60 hidden sm:inline">{s.risk}</span>
-                </button>
-              )
-            })}
+        {/* Main area */}
+        <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
+
+          {/* Strategy tabs */}
+          <div
+            className="flex items-center gap-0 border-b shrink-0"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}
+          >
+            <div className="flex items-center">
+              {STRATS.map((s) => {
+                const active = selectedStrategy === s.id
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => selectStrategy(s.id)}
+                    className="relative px-5 py-3 font-mono text-xs transition-all border-r"
+                    style={{
+                      borderColor: 'var(--border)',
+                      color: active ? s.accent : 'var(--ink-3)',
+                      background: active ? `${s.accent}08` : 'transparent',
+                    }}
+                  >
+                    {active && (
+                      <span className="absolute bottom-0 left-0 right-0 h-px" style={{ background: s.accent }} />
+                    )}
+                    <span className="font-medium">{s.id}</span>
+                    <span className="ml-2 text-2xs opacity-60 hidden sm:inline">{s.risk}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex-1" />
+            {activeStrat && (
+              <span
+                className="font-mono text-2xs px-3 hidden md:inline"
+                style={{ color: activeStrat.accent, opacity: 0.6 }}
+              >
+                {activeStrat.personality}
+              </span>
+            )}
+            <div className="flex items-center gap-2 px-4">
+              <span
+                className="h-1.5 w-1.5 rounded-full hermes-alive"
+                style={{ background: activeStrat?.accent ?? 'var(--hermes)' }}
+              />
+              <span className="font-mono text-2xs hidden sm:inline" style={{ color: 'var(--ink-3)' }}>Hermes 3</span>
+            </div>
           </div>
-          <div className="flex-1" />
-          <div className="flex items-center gap-2 px-4">
-            <span
-              className="h-1.5 w-1.5 rounded-full hermes-alive"
-              style={{ background: selectedStrategy ? STRATS.find((s) => s.id === selectedStrategy)?.accent : 'var(--hermes)' }}
-            />
-            <span className="font-mono text-2xs hidden sm:inline" style={{ color: 'var(--ink-3)' }}>Hermes 3</span>
-          </div>
-        </div>
 
-        {/* Messages */}
-        <div
-          ref={messagesRef}
-          className="flex-1 overflow-y-auto px-5 py-5 space-y-3"
-          style={{ background: 'var(--bg)' }}
-        >
-          {!started && <StrategySelector onSelect={selectStrategy} />}
+          {/* Messages */}
+          <div
+            ref={messagesRef}
+            className="flex-1 overflow-y-auto px-5 py-5 space-y-3"
+            style={{ background: 'var(--bg)' }}
+          >
+            {!started && <StrategySelector onSelect={selectStrategy} />}
 
-          {messages.map((msg) => (
-            <div key={msg.id} className="slide-up">
-              {msg.role === 'system' && (
-                <div className="flex gap-2 font-mono text-xs" style={{ color: 'var(--ink-3)' }}>
-                  <span style={{ opacity: 0.4 }}>—</span>
-                  <span>{msg.content}</span>
-                </div>
-              )}
-              {msg.role === 'user' && (
-                <div className="flex gap-2 font-mono text-xs">
-                  <span className="shrink-0" style={{ color: 'var(--arc)' }}>›</span>
-                  <span style={{ color: 'var(--ink)' }}>{msg.content}</span>
-                </div>
-              )}
-              {msg.role === 'assistant' && (
-                <div className="flex gap-2 font-mono text-xs">
-                  <span className="shrink-0 font-bold" style={{ color: 'var(--arc)' }}>A</span>
-                  <div className="flex-1 min-w-0">
-                    {(msg.toolCalls?.length ?? 0) > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mb-1.5">
-                        {msg.toolCalls!.map((tc, i) => (
-                          <span
-                            key={i}
-                            className="font-mono text-2xs px-1.5 py-0.5 rounded-sm"
-                            style={{
-                              color: 'rgba(110,95,240,0.6)',
-                              border: '1px solid rgba(110,95,240,0.15)',
-                              background: 'rgba(110,95,240,0.06)',
-                            }}
-                          >
-                            <span className="inline-block h-1 w-1 rounded-full mr-1 animate-pulse align-middle" style={{ background: 'rgba(110,95,240,0.5)' }} />
-                            {tc === 'read_vault_state' ? 'reading vault' : tc === 'get_market_prices' ? 'fetching prices' : tc}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                    {msg.pending && !msg.content ? (
-                      <span className="inline-block w-1.5 h-3.5 align-middle cursor-blink" style={{ background: 'var(--arc)' }} />
-                    ) : (
-                      <span className="whitespace-pre-wrap leading-relaxed break-words" style={{ color: 'var(--ink-2)' }}>
-                        {msg.content}
-                        {msg.pending && (
-                          <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle cursor-blink" style={{ background: 'var(--arc)' }} />
-                        )}
-                      </span>
-                    )}
-                    {msg.proposal && (
-                      <ProposalCard
-                        proposal={msg.proposal}
-                        executing={executingId === msg.id}
-                        onApprove={() => executeProposal(msg.id, msg.proposal!)}
-                        onDecline={() => setMessages((prev) => prev.map((m) => m.id === msg.id ? { ...m, proposal: undefined } : m))}
-                      />
-                    )}
+            {messages.map((msg) => (
+              <div key={msg.id} className="slide-up">
+                {msg.role === 'system' && (
+                  <div className="flex gap-2 font-mono text-xs" style={{ color: 'var(--ink-3)' }}>
+                    <span style={{ opacity: 0.4 }}>—</span>
+                    <span>{msg.content}</span>
                   </div>
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+                )}
+                {msg.role === 'user' && (
+                  <div className="flex gap-2 font-mono text-xs">
+                    <span className="shrink-0" style={{ color: 'var(--arc)' }}>›</span>
+                    <span style={{ color: 'var(--ink)' }}>{msg.content}</span>
+                  </div>
+                )}
+                {msg.role === 'assistant' && (
+                  <div className="flex gap-2 font-mono text-xs">
+                    <span
+                      className="shrink-0 font-bold text-xs"
+                      style={{ color: activeStrat?.accent ?? 'var(--arc)' }}
+                    >
+                      {selectedStrategy ?? 'A'}
+                    </span>
+                    <div className="flex-1 min-w-0">
+                      {(msg.toolCalls?.length ?? 0) > 0 && (
+                        <div className="flex flex-wrap gap-1.5 mb-1.5">
+                          {msg.toolCalls!.map((tc, i) => (
+                            <span
+                              key={i}
+                              className="font-mono text-2xs px-1.5 py-0.5 rounded-sm"
+                              style={{
+                                color: 'rgba(110,95,240,0.6)',
+                                border: '1px solid rgba(110,95,240,0.15)',
+                                background: 'rgba(110,95,240,0.06)',
+                              }}
+                            >
+                              <span className="inline-block h-1 w-1 rounded-full mr-1 animate-pulse align-middle" style={{ background: 'rgba(110,95,240,0.5)' }} />
+                              {tc === 'read_vault_state' ? 'reading vault' : tc === 'get_market_prices' ? 'fetching prices' : tc}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {msg.pending && !msg.content ? (
+                        <span className="inline-block w-1.5 h-3.5 align-middle cursor-blink" style={{ background: activeStrat?.accent ?? 'var(--arc)' }} />
+                      ) : (
+                        <span className="whitespace-pre-wrap leading-relaxed break-words" style={{ color: 'var(--ink-2)' }}>
+                          {msg.content}
+                          {msg.pending && (
+                            <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle cursor-blink" style={{ background: activeStrat?.accent ?? 'var(--arc)' }} />
+                          )}
+                        </span>
+                      )}
+                      {msg.proposal && (
+                        <ProposalCard
+                          proposal={msg.proposal}
+                          executing={executingId === msg.id}
+                          onApprove={() => handleApprove(msg.id, msg.proposal!)}
+                          onDecline={() => setMessages((prev) => prev.map((m) => m.id === msg.id ? { ...m, proposal: undefined } : m))}
+                        />
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
 
-        {/* Input area */}
-        <div
-          className="shrink-0 border-t"
-          style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}
-        >
-          {/* Hint bar */}
-          {started && (
-            <div
-              className="px-5 py-1.5 flex flex-wrap items-center gap-3 border-b"
-              style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
-            >
-              {[t.terminal.hint1, t.terminal.hint2, t.terminal.hint3].map((h, i) => (
-                <span key={i} className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
-                  {i > 0 && <span className="mr-3">·</span>}{h}
-                </span>
-              ))}
-            </div>
-          )}
+          {/* Input area */}
+          <div
+            className="shrink-0 border-t"
+            style={{ borderColor: 'var(--border)', background: 'var(--surface)' }}
+          >
+            {started && (
+              <div
+                className="px-5 py-1.5 flex flex-wrap items-center gap-3 border-b"
+                style={{ borderColor: 'var(--border)', background: 'var(--surface-2)' }}
+              >
+                {[t.terminal.hint1, t.terminal.hint2, t.terminal.hint3].map((h, i) => (
+                  <span key={i} className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+                    {i > 0 && <span className="mr-3">·</span>}{h}
+                  </span>
+                ))}
+              </div>
+            )}
 
-          <div className="flex items-end gap-3 px-5 py-3">
-            <span
-              className="font-mono text-sm pb-0.5 shrink-0"
-              style={{
-                color: started ? 'var(--arc)' : 'var(--ink-3)',
-                textShadow: started ? '0 0 8px rgba(110,95,240,0.5)' : 'none',
-              }}
-            >›</span>
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={(e) => {
-                setInput(e.target.value)
-                e.target.style.height = 'auto'
-                e.target.style.height = Math.min(e.target.scrollHeight, 96) + 'px'
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  sendMessage()
-                }
-              }}
-              disabled={loading || !started}
-              placeholder={started ? t.terminal.placeholder : t.terminal.placeholderInactive}
-              rows={1}
-              className="flex-1 min-w-0 bg-transparent font-mono text-sm placeholder:text-[var(--ink-3)]/30 outline-none disabled:opacity-30 leading-relaxed overflow-hidden"
-              style={{
-                height: '1.75rem',
-                maxHeight: '96px',
-                resize: 'none',
-                caretColor: 'var(--arc)',
-                color: 'var(--ink)',
-              }}
-            />
-            <button
-              onClick={sendMessage}
-              disabled={loading || !input.trim() || !started}
-              className="font-mono text-xs rounded-sm px-3 py-1.5 transition-all disabled:opacity-20 shrink-0"
-              style={{
-                color: 'var(--arc)',
-                border: '1px solid rgba(110,95,240,0.2)',
-                background: 'rgba(110,95,240,0.06)',
-              }}
-            >
-              {loading ? '···' : t.terminal.send}
-            </button>
+            <div className="flex items-end gap-3 px-5 py-3">
+              <span
+                className="font-mono text-sm pb-0.5 shrink-0"
+                style={{
+                  color: started ? (activeStrat?.accent ?? 'var(--arc)') : 'var(--ink-3)',
+                  textShadow: started && activeStrat ? `0 0 8px ${activeStrat.accent}80` : 'none',
+                }}
+              >›</span>
+              <textarea
+                ref={textareaRef}
+                value={input}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  e.target.style.height = 'auto'
+                  e.target.style.height = Math.min(e.target.scrollHeight, 96) + 'px'
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    sendMessage()
+                  }
+                }}
+                disabled={loading || !started}
+                placeholder={started ? t.terminal.placeholder : t.terminal.placeholderInactive}
+                rows={1}
+                className="flex-1 min-w-0 bg-transparent font-mono text-sm placeholder:text-[var(--ink-3)]/30 outline-none disabled:opacity-30 leading-relaxed overflow-hidden"
+                style={{
+                  height: '1.75rem',
+                  maxHeight: '96px',
+                  resize: 'none',
+                  caretColor: activeStrat?.accent ?? 'var(--arc)',
+                  color: 'var(--ink)',
+                }}
+              />
+              <button
+                onClick={sendMessage}
+                disabled={loading || !input.trim() || !started}
+                className="font-mono text-xs rounded-sm px-3 py-1.5 transition-all disabled:opacity-20 shrink-0"
+                style={{
+                  color: activeStrat?.accent ?? 'var(--arc)',
+                  border: `1px solid ${activeStrat?.accent ?? 'rgba(110,95,240,0.2)'}40`,
+                  background: `${activeStrat?.accent ?? 'rgba(110,95,240,0.06)'}10`,
+                }}
+              >
+                {loading ? '···' : t.terminal.send}
+              </button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </>
   )
 }
