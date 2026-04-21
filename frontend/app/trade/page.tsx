@@ -677,7 +677,7 @@ export default function TradePage() {
   const [closingId, setClosingId] = useState<bigint | null>(null)
   const [showOrderBook, setShowOrderBook] = useState(true)
 
-  const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSD' : 'BINANCE:BTCUSD'
+  const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSDT' : 'BINANCE:BTCUSDT'
   const bncSymbol = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
 
   const {
