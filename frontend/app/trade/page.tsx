@@ -2,11 +2,13 @@
 export const dynamic = 'force-dynamic'
 
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { useRouter } from 'next/navigation'
 import {
   useAccount,
   useReadContract,
   useWriteContract,
   useWaitForTransactionReceipt,
+  useWatchContractEvent,
 } from 'wagmi'
 import Link from 'next/link'
 import nextDynamic from 'next/dynamic'
@@ -17,7 +19,7 @@ import {
   VAULT_ABI,
 } from '@/lib/contracts'
 import { formatMarket, timeAgo } from '@/lib/utils'
-import { ChevronDown, ChevronUp, ExternalLink, RefreshCw } from 'lucide-react'
+import { ChevronDown, ChevronUp, ExternalLink, RefreshCw, ArrowUpRight, ArrowDownRight, Zap } from 'lucide-react'
 
 const TVChart = nextDynamic(
   () => import('@/components/TVChart').then((m) => m.TVChart),
@@ -32,6 +34,7 @@ const OrderBook = nextDynamic(
 
 type Asset = 'ETH' | 'BTC'
 type Tab = 'positions' | 'history'
+type Direction = 'long' | 'short'
 
 interface Ticker {
   lastPrice: number
@@ -43,26 +46,27 @@ interface Ticker {
   quoteVolume: number
 }
 
+const STRAT_NAMES = ['APOLLO', 'ATLAS', 'ARES'] as const
+const STRAT_ACCENTS: Record<string, string> = { APOLLO: '#6e5ff0', ATLAS: '#3d9ac2', ARES: '#c94e4e' }
+const STRAT_MAX_LEV: Record<string, number> = { APOLLO: 3, ATLAS: 5, ARES: 10 }
+const STRAT_LONG_ONLY: Record<string, boolean> = { APOLLO: true, ATLAS: false, ARES: false }
+
 // ─── Loaders ────────────────────────────────────────────────────────────────
 
 function ChartLoader() {
   return (
-    <div
-      className="w-full h-full flex flex-col items-center justify-center gap-3"
-      style={{ background: 'var(--bg)' }}
-    >
+    <div className="w-full h-full flex flex-col items-center justify-center gap-3" style={{ background: 'var(--bg)' }}>
       <div className="h-8 w-8 rounded-full border-2 border-t-transparent animate-spin" style={{ borderColor: 'var(--arc)', borderTopColor: 'transparent' }} />
       <span className="font-mono text-xs" style={{ color: 'var(--ink-3)' }}>Loading chart...</span>
     </div>
   )
 }
 
-// ─── 24h Ticker data (Binance REST) ─────────────────────────────────────────
+// ─── 24h Ticker ─────────────────────────────────────────────────────────────
 
 function useTicker(asset: Asset) {
   const [ticker, setTicker] = useState<Ticker | null>(null)
   const [prev, setPrev] = useState<number | null>(null)
-
   const sym = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
 
   const fetch_ = useCallback(async () => {
@@ -87,7 +91,6 @@ function useTicker(asset: Asset) {
     return () => clearInterval(iv)
   }, [fetch_])
 
-  // Live price via WebSocket
   useEffect(() => {
     const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym.toLowerCase()}@trade`)
     ws.onmessage = (e) => {
@@ -108,15 +111,9 @@ function useTicker(asset: Asset) {
   return { ticker, prev }
 }
 
-// ─── Market header bar ────────────────────────────────────────────────────────
+// ─── Market header ───────────────────────────────────────────────────────────
 
-function MarketHeader({
-  asset,
-  onSelect,
-}: {
-  asset: Asset
-  onSelect: (a: Asset) => void
-}) {
+function MarketHeader({ asset, onSelect }: { asset: Asset; onSelect: (a: Asset) => void }) {
   const { ticker, prev } = useTicker(asset)
   const isUp = ticker && prev ? ticker.lastPrice >= prev : true
   const isPositive = ticker ? ticker.priceChangePercent >= 0 : true
@@ -134,7 +131,6 @@ function MarketHeader({
       className="flex items-center gap-0 border-b shrink-0 overflow-x-auto"
       style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '52px', minHeight: '52px' }}
     >
-      {/* Market tabs */}
       {(['ETH', 'BTC'] as Asset[]).map((a) => (
         <button
           key={a}
@@ -147,21 +143,14 @@ function MarketHeader({
             position: 'relative',
           }}
         >
-          {asset === a && (
-            <span
-              className="absolute bottom-0 left-0 right-0 h-0.5"
-              style={{ background: 'var(--arc)' }}
-            />
-          )}
+          {asset === a && <span className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: 'var(--arc)' }} />}
           <span className="font-semibold">{a}-PERP</span>
           <span style={{ color: 'var(--ink-3)', fontSize: '0.6rem' }}>USDC</span>
         </button>
       ))}
 
-      {/* Divider */}
       <div className="h-6 w-px mx-2 shrink-0" style={{ background: 'var(--border-2)' }} />
 
-      {/* Price */}
       <div className="px-3 shrink-0">
         <div
           className="font-mono text-lg font-medium tabular-nums transition-colors duration-200"
@@ -172,17 +161,11 @@ function MarketHeader({
         >
           {ticker ? `$${fmt(ticker.lastPrice, asset === 'ETH' ? 2 : 1)}` : '—'}
         </div>
-        <div
-          className="font-mono text-2xs"
-          style={{ color: isPositive ? 'var(--gain)' : 'var(--loss)' }}
-        >
-          {ticker
-            ? `${isPositive ? '+' : ''}${ticker.priceChangePercent.toFixed(2)}%`
-            : '—'}
+        <div className="font-mono text-2xs" style={{ color: isPositive ? 'var(--gain)' : 'var(--loss)' }}>
+          {ticker ? `${isPositive ? '+' : ''}${ticker.priceChangePercent.toFixed(2)}%` : '—'}
         </div>
       </div>
 
-      {/* Stats */}
       {ticker && (
         <div className="flex items-center gap-6 px-4 overflow-x-auto">
           {[
@@ -192,12 +175,8 @@ function MarketHeader({
             { label: '24h Volume', value: fmtVol(ticker.quoteVolume), color: 'var(--ink-2)' },
           ].map((s) => (
             <div key={s.label} className="shrink-0">
-              <div className="font-mono text-2xs uppercase tracking-widest mb-0.5" style={{ color: 'var(--ink-3)' }}>
-                {s.label}
-              </div>
-              <div className="font-mono text-xs tabular-nums" style={{ color: s.color }}>
-                {s.value}
-              </div>
+              <div className="font-mono text-2xs uppercase tracking-widest mb-0.5" style={{ color: 'var(--ink-3)' }}>{s.label}</div>
+              <div className="font-mono text-xs tabular-nums" style={{ color: s.color }}>{s.value}</div>
             </div>
           ))}
         </div>
@@ -205,7 +184,6 @@ function MarketHeader({
 
       <div className="flex-1" />
 
-      {/* Arc Testnet badge */}
       <div className="flex items-center gap-1.5 px-4 shrink-0">
         <span className="h-1.5 w-1.5 rounded-full hermes-alive" style={{ background: 'var(--gain)' }} />
         <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Arc Testnet</span>
@@ -214,21 +192,32 @@ function MarketHeader({
   )
 }
 
+// ─── Live mark price hook ────────────────────────────────────────────────────
+
+function useMarkPrice(market: string | null) {
+  const [price, setPrice] = useState<number | null>(null)
+  useEffect(() => {
+    if (!market) return
+    const sym = market.includes('BTC') ? 'btcusdt' : 'ethusdt'
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@miniTicker`)
+    ws.onmessage = (e) => {
+      try { setPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
+    }
+    ws.onerror = () => ws.close()
+    return () => ws.close()
+  }, [market])
+  return price
+}
+
 // ─── Position row ─────────────────────────────────────────────────────────────
 
 function PositionRow({
   positionId,
-  asset,
-  onClose,
-  isClosing,
+  onRequestClose,
 }: {
   positionId: bigint
-  asset: Asset
-  onClose: (id: bigint) => void
-  isClosing: boolean
+  onRequestClose: (id: bigint, marketStr: string, isLong: boolean) => void
 }) {
-  const [currentPrice, setCurrentPrice] = useState<number | null>(null)
-
   const { data: pos, refetch: refetchPos } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
@@ -242,20 +231,13 @@ function PositionRow({
     args: [positionId],
   })
 
-  // Subscribe to live price
+  const marketStr = pos ? formatMarket(pos[2] as `0x${string}`) : ''
+  const markPrice = useMarkPrice(pos ? marketStr : null)
+
   useEffect(() => {
     if (!pos) return
-    const [,, market] = pos
-    const mkt = formatMarket(market as `0x${string}`).split('/')[0]
-    const sym = mkt === 'BTC' ? 'btcusdt' : 'ethusdt'
-    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@miniTicker`)
-    ws.onmessage = (e) => {
-      try { setCurrentPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
-    }
-    ws.onerror = () => ws.close()
-
-    const refetchIv = setInterval(() => { refetchPos(); refetchPnl() }, 5_000)
-    return () => { ws.close(); clearInterval(refetchIv) }
+    const iv = setInterval(() => { refetchPos(); refetchPnl() }, 5_000)
+    return () => clearInterval(iv)
   }, [pos, refetchPos, refetchPnl])
 
   if (!pos) return (
@@ -266,21 +248,38 @@ function PositionRow({
     </tr>
   )
 
-  const [id, , market, isLong, size, entryPrice, leverage, collateral, openedAt, isOpen] = pos
+  // Use explicit index access — safer with viem named tuples
+  const posId = pos[0] as bigint
+  const market = pos[2] as `0x${string}`
+  const isLong = pos[3] as boolean
+  const size = pos[4] as bigint
+  const entryPrice = pos[5] as bigint
+  const leverage = pos[6] as number
+  const collateral = pos[7] as bigint
+  const openedAt = pos[8] as bigint
+  const isOpen = pos[9] as boolean
+  const fundingAccrued = pos[10] as bigint
+
   if (!isOpen) return null
 
   const pnlNum = pnlRaw !== undefined ? Number(pnlRaw) / 1e6 : 0
+  const fundingNum = Number(fundingAccrued) / 1e6
+  const totalPnl = pnlNum + fundingNum
   const collateralNum = Number(collateral) / 1e6
   const sizeNum = Number(size) / 1e6
   const entryNum = Number(entryPrice) / 1e8
   const levNum = Number(leverage)
-  const pnlPct = collateralNum > 0 ? (pnlNum / collateralNum) * 100 : 0
+  const pnlPct = collateralNum > 0 ? (totalPnl / collateralNum) * 100 : 0
   const liqBuffer = 1 / levNum
   const liqPrice = isLong ? entryNum * (1 - liqBuffer) : entryNum * (1 + liqBuffer)
-  const marketStr = formatMarket(market as `0x${string}`)
-  const isProfit = pnlNum >= 0
+  const isProfit = totalPnl >= 0
   const pnlColor = isProfit ? 'var(--gain)' : 'var(--loss)'
   const dirColor = isLong ? 'var(--gain)' : 'var(--loss)'
+
+  // Health factor: how close to liquidation (0 = healthy, 100 = liquidated)
+  const currentPriceFmt = markPrice ?? entryNum
+  const priceDelta = isLong ? (currentPriceFmt - entryNum) : (entryNum - currentPriceFmt)
+  const healthPct = Math.min(100, Math.max(0, ((entryNum * liqBuffer - Math.abs(priceDelta)) / (entryNum * liqBuffer)) * 100))
 
   const fmtP = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
 
@@ -291,8 +290,8 @@ function PositionRow({
       onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'var(--surface-2)' }}
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
     >
-      {/* Market */}
-      <td className="px-4 py-3">
+      {/* Market / Side */}
+      <td className="px-4 py-2.5">
         <div className="flex items-center gap-2">
           <span
             className="font-mono text-2xs px-1.5 py-0.5 rounded-sm font-bold"
@@ -304,23 +303,27 @@ function PositionRow({
           >
             {isLong ? 'LONG' : 'SHORT'}
           </span>
-          <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>{marketStr}</span>
+          <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>
+            {marketStr}
+          </span>
         </div>
-        <div className="font-mono text-2xs mt-0.5" style={{ color: 'var(--ink-3)' }}>#{id.toString()} · {timeAgo(Number(openedAt))}</div>
+        <div className="font-mono text-2xs mt-0.5" style={{ color: 'var(--ink-3)' }}>
+          #{posId.toString()} · {timeAgo(Number(openedAt))}
+        </div>
       </td>
 
       {/* Size */}
-      <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--ink)' }}>
-        ${sizeNum.toLocaleString('en-US', { maximumFractionDigits: 2 })}
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums" style={{ color: 'var(--ink)' }}>
+        ${sizeNum.toLocaleString('en-US', { maximumFractionDigits: 0 })}
       </td>
 
       {/* Collateral */}
-      <td className="px-4 py-3 font-mono text-xs" style={{ color: 'var(--ink-2)' }}>
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums" style={{ color: 'var(--ink-2)' }}>
         ${collateralNum.toFixed(2)}
       </td>
 
       {/* Leverage */}
-      <td className="px-4 py-3">
+      <td className="px-3 py-2.5">
         <span
           className="font-mono text-2xs px-1.5 py-0.5 rounded-sm"
           style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)', border: '1px solid rgba(110,95,240,0.2)' }}
@@ -329,79 +332,161 @@ function PositionRow({
         </span>
       </td>
 
-      {/* Entry Price */}
-      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: 'var(--ink-2)' }}>
+      {/* Entry */}
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums" style={{ color: 'var(--ink-2)' }}>
         {fmtP(entryNum)}
       </td>
 
-      {/* Mark Price */}
-      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: 'var(--ink)' }}>
-        {currentPrice ? fmtP(currentPrice) : '—'}
+      {/* Mark */}
+      <td className="px-3 py-2.5 font-mono text-xs tabular-nums" style={{ color: 'var(--ink)' }}>
+        {markPrice ? fmtP(markPrice) : '—'}
       </td>
 
       {/* Liq Price */}
-      <td className="px-4 py-3 font-mono text-xs tabular-nums" style={{ color: '#c94e4e', opacity: 0.8 }}>
-        {fmtP(liqPrice)}
+      <td className="px-3 py-2.5">
+        <div className="font-mono text-xs tabular-nums" style={{ color: '#e05555', opacity: 0.85 }}>
+          {fmtP(liqPrice)}
+        </div>
+        {/* Health bar */}
+        <div className="mt-1 h-0.5 rounded-full overflow-hidden" style={{ width: '52px', background: 'var(--border-2)' }}>
+          <div
+            className="h-full rounded-full transition-all"
+            style={{
+              width: `${healthPct}%`,
+              background: healthPct > 60 ? 'var(--gain)' : healthPct > 30 ? '#b8913a' : '#c94e4e',
+            }}
+          />
+        </div>
       </td>
 
       {/* P&L */}
-      <td className="px-4 py-3">
+      <td className="px-3 py-2.5">
         <div className="font-mono text-xs font-medium tabular-nums" style={{ color: pnlColor }}>
-          {isProfit ? '+' : ''}${Math.abs(pnlNum).toFixed(2)}
+          {isProfit ? '+' : ''}${Math.abs(totalPnl).toFixed(2)}
         </div>
         <div className="font-mono text-2xs" style={{ color: pnlColor, opacity: 0.7 }}>
           {isProfit ? '+' : ''}{Math.abs(pnlPct).toFixed(2)}%
         </div>
       </td>
 
-      {/* Close */}
-      <td className="px-4 py-3">
+      {/* Action */}
+      <td className="px-3 py-2.5">
         <button
-          onClick={() => onClose(positionId)}
-          disabled={isClosing}
-          className="font-mono text-2xs px-3 py-1.5 rounded-sm transition-all disabled:opacity-40"
+          onClick={() => onRequestClose(posId, marketStr, isLong)}
+          className="font-mono text-2xs px-2.5 py-1.5 rounded-sm transition-all"
           style={{
-            color: '#c94e4e',
+            color: '#e05555',
             border: '1px solid rgba(201,78,78,0.25)',
-            background: 'rgba(201,78,78,0.06)',
+            background: 'rgba(201,78,78,0.05)',
           }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.15)' }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.06)' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.12)' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.05)' }}
         >
-          {isClosing ? '...' : 'Close'}
+          Close
         </button>
       </td>
     </tr>
   )
 }
 
-// ─── Positions panel (bottom) ─────────────────────────────────────────────────
+// ─── Close confirm modal ──────────────────────────────────────────────────────
+
+function CloseConfirmModal({
+  positionId,
+  marketStr,
+  isLong,
+  onConfirm,
+  onCancel,
+}: {
+  positionId: bigint
+  marketStr: string
+  isLong: boolean
+  onConfirm: () => void
+  onCancel: () => void
+}) {
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel()
+      if (e.key === 'Enter') onConfirm()
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [onCancel, onConfirm])
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4"
+      style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(6px)' }}
+      onClick={(e) => { if (e.target === e.currentTarget) onCancel() }}
+    >
+      <div
+        className="w-full max-w-sm rounded-sm overflow-hidden"
+        style={{
+          background: 'var(--surface)',
+          border: '1px solid rgba(201,78,78,0.3)',
+          boxShadow: '0 0 60px rgba(201,78,78,0.1), 0 24px 48px rgba(0,0,0,0.5)',
+        }}
+      >
+        <div className="px-5 py-4 border-b flex items-center gap-3" style={{ borderColor: 'rgba(201,78,78,0.15)', background: 'rgba(201,78,78,0.06)' }}>
+          <span className="font-mono text-xs font-medium tracking-widest uppercase flex-1" style={{ color: '#e05555' }}>
+            Close Position #{positionId.toString()}
+          </span>
+          <button onClick={onCancel} className="font-mono text-sm" style={{ color: 'var(--ink-3)' }}>×</button>
+        </div>
+        <div className="px-5 py-5">
+          <p className="font-mono text-sm mb-2" style={{ color: 'var(--ink)' }}>
+            Close {isLong ? 'LONG' : 'SHORT'} {marketStr}?
+          </p>
+          <p className="font-mono text-xs mb-5 leading-relaxed" style={{ color: 'var(--ink-3)' }}>
+            This will send a close request to the ARCANA agent. Hermes will execute the close at the next available price.
+          </p>
+          <div className="flex gap-3">
+            <button
+              onClick={onConfirm}
+              className="flex-1 font-mono text-sm py-2.5 rounded-sm transition-all"
+              style={{ background: 'rgba(201,78,78,0.12)', color: '#e05555', border: '1px solid rgba(201,78,78,0.28)' }}
+            >
+              Request Close
+            </button>
+            <button
+              onClick={onCancel}
+              className="font-mono text-sm px-5 py-2.5 rounded-sm"
+              style={{ border: '1px solid var(--border)', color: 'var(--ink-3)' }}
+            >
+              Cancel
+            </button>
+          </div>
+          <p className="font-mono text-2xs text-center mt-3" style={{ color: 'var(--ink-3)', opacity: 0.5 }}>
+            Enter to confirm · Esc to cancel
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ─── Positions panel ──────────────────────────────────────────────────────────
 
 function PositionsPanel({
   tab,
   onTabChange,
   positionIds,
-  asset,
-  onClose,
-  closingId,
   isLoading,
   onRefresh,
+  onRequestClose,
 }: {
   tab: Tab
   onTabChange: (t: Tab) => void
   positionIds: readonly bigint[]
-  asset: Asset
-  onClose: (id: bigint) => void
-  closingId: bigint | null
   isLoading: boolean
   onRefresh: () => void
+  onRequestClose: (id: bigint, marketStr: string, isLong: boolean) => void
 }) {
   return (
     <div
       className="border-t flex flex-col"
       style={{ borderColor: 'var(--border)', background: 'var(--surface)', minHeight: '200px', maxHeight: '280px' }}
     >
-      {/* Tab bar */}
       <div
         className="flex items-center gap-0 border-b shrink-0"
         style={{ borderColor: 'var(--border)', background: 'var(--surface-2)', height: '38px' }}
@@ -411,20 +496,12 @@ function PositionsPanel({
             key={t}
             onClick={() => onTabChange(t)}
             className="relative px-4 h-full font-mono text-xs transition-all"
-            style={{
-              color: tab === t ? 'var(--ink)' : 'var(--ink-2)',
-              background: 'transparent',
-            }}
+            style={{ color: tab === t ? 'var(--ink)' : 'var(--ink-2)', background: 'transparent' }}
           >
-            {tab === t && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: 'var(--arc)' }} />
-            )}
+            {tab === t && <span className="absolute bottom-0 left-0 right-0 h-0.5" style={{ background: 'var(--arc)' }} />}
             {label}
             {t === 'positions' && positionIds.length > 0 && (
-              <span
-                className="ml-1.5 font-mono text-2xs px-1 py-0.5 rounded-full"
-                style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)' }}
-              >
+              <span className="ml-1.5 font-mono text-2xs px-1 py-0.5 rounded-full" style={{ color: 'var(--arc)', background: 'rgba(110,95,240,0.1)' }}>
                 {positionIds.length}
               </span>
             )}
@@ -450,14 +527,13 @@ function PositionsPanel({
         </Link>
       </div>
 
-      {/* Content */}
       <div className="flex-1 overflow-auto">
         {tab === 'positions' && (
           positionIds.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full gap-2 py-8">
               <span className="font-mono text-xs" style={{ color: 'var(--ink-2)' }}>No open positions</span>
-              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
-                Use ARCANA agent to open positions on Arc Testnet
+              <span className="font-mono text-2xs text-center max-w-xs leading-relaxed" style={{ color: 'var(--ink-3)' }}>
+                Positions are opened by the ARCANA agent based on your strategy. Use the order panel or the ARCANA terminal to request a trade.
               </span>
               <Link
                 href="/app"
@@ -471,11 +547,11 @@ function PositionsPanel({
             <table className="w-full font-mono text-xs">
               <thead className="sticky top-0" style={{ background: 'var(--surface)' }}>
                 <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                  {['Market / Side', 'Size', 'Collateral', 'Lev', 'Entry Price', 'Mark Price', 'Liq. Price', 'P&L', 'Action'].map((h) => (
+                  {['Market / Side', 'Size', 'Collateral', 'Lev', 'Entry', 'Mark', 'Liq. / Health', 'P&L', 'Action'].map((h) => (
                     <th
                       key={h}
-                      className="px-4 py-2 text-left font-normal"
-                      style={{ color: 'var(--ink-3)', fontSize: '0.6rem', letterSpacing: '0.1em', textTransform: 'uppercase' }}
+                      className="px-3 py-2 text-left font-normal"
+                      style={{ color: 'var(--ink-3)', fontSize: '0.58rem', letterSpacing: '0.1em', textTransform: 'uppercase' }}
                     >
                       {h}
                     </th>
@@ -487,9 +563,7 @@ function PositionsPanel({
                   <PositionRow
                     key={id.toString()}
                     positionId={id}
-                    asset={asset}
-                    onClose={onClose}
-                    isClosing={closingId === id}
+                    onRequestClose={onRequestClose}
                   />
                 ))}
               </tbody>
@@ -516,9 +590,16 @@ function PositionsPanel({
   )
 }
 
-// ─── ARCANA right panel ────────────────────────────────────────────────────────
+// ─── Order panel (right side) ─────────────────────────────────────────────────
 
-function ArcanaPanel({ asset }: { asset: Asset }) {
+function OrderPanel({ asset, ticker }: { asset: Asset; ticker: Ticker | null }) {
+  const router = useRouter()
+  const { address } = useAccount()
+  const [direction, setDirection] = useState<Direction>('long')
+  const [collateral, setCollateral] = useState('50')
+  const [leverage, setLeverage] = useState(3)
+
+  // Vault data
   const { data: activeStrategyIndex } = useReadContract({
     address: VAULT_ADDRESS,
     abi: VAULT_ABI,
@@ -529,140 +610,250 @@ function ArcanaPanel({ asset }: { asset: Asset }) {
     abi: VAULT_ABI,
     functionName: 'totalAssets',
   })
-  const { data: totalTrades } = useReadContract({
-    address: VAULT_ADDRESS,
-    abi: VAULT_ABI,
-    functionName: 'totalTradesExecuted',
-  })
   const { data: lastCycle } = useReadContract({
     address: VAULT_ADDRESS,
     abi: VAULT_ABI,
     functionName: 'lastHermesCycle',
   })
 
-  const NAMES = ['APOLLO', 'ATLAS', 'ARES'] as const
-  const COLORS: Record<string, string> = { APOLLO: '#6e5ff0', ATLAS: '#3d9ac2', ARES: '#c94e4e' }
-  const RISK: Record<string, string> = { APOLLO: '3× Long', ATLAS: '5× L+S', ARES: '10× L+S' }
-  const stratName = activeStrategyIndex !== undefined ? NAMES[Number(activeStrategyIndex)] : null
-  const accent = stratName ? COLORS[stratName] : 'var(--hermes)'
+  // User vault balance
+  const { data: userShares } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  })
+  const { data: userValueRaw } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'convertToAssets',
+    args: userShares && userShares > 0n ? [userShares] : undefined,
+    query: { enabled: !!userShares && userShares > 0n },
+  })
+
+  const stratName = activeStrategyIndex !== undefined ? STRAT_NAMES[Number(activeStrategyIndex)] : null
+  const accent = stratName ? STRAT_ACCENTS[stratName] : 'var(--arc)'
+  const maxLev = stratName ? STRAT_MAX_LEV[stratName] : 3
+  const longOnly = stratName ? STRAT_LONG_ONLY[stratName] : false
+  const userValue = userValueRaw ? (Number(userValueRaw) / 1e6).toFixed(2) : null
   const tvl = totalAssets ? (Number(totalAssets) / 1e6).toFixed(2) : '—'
 
-  const quickActions = [
-    { label: `Long ${asset} · 50 USDC`, msg: `long ${asset} 50 USDC`, color: 'var(--gain)' },
-    { label: `Long ${asset} · 100 USDC`, msg: `long ${asset} 100 USDC`, color: 'var(--gain)' },
-    { label: `Short ${asset} · 50 USDC`, msg: `short ${asset} 50 USDC`, color: 'var(--loss)' },
-    { label: 'Close all positions', msg: 'close all positions', color: 'var(--ink-2)' },
-  ]
+  // Clamp leverage to strategy max
+  const effectiveLev = Math.min(leverage, maxLev)
+  const collateralNum = parseFloat(collateral) || 0
+  const positionSize = collateralNum * effectiveLev
+  const currentPrice = ticker?.lastPrice ?? null
+  const liqBuffer = 1 / effectiveLev
+  const estLiq = currentPrice
+    ? direction === 'long'
+      ? currentPrice * (1 - liqBuffer)
+      : currentPrice * (1 + liqBuffer)
+    : null
+
+  const leverageMarks = [1, 2, 3, 5, 7, 10].filter((l) => l <= maxLev)
+
+  const handleOrder = () => {
+    const msg = `${direction} ${asset} ${collateral} usdc ${effectiveLev}x leverage`
+    router.push(`/app?msg=${encodeURIComponent(msg)}`)
+  }
+
+  const fmtP = (n: number) =>
+    n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
   return (
     <div
       className="flex flex-col h-full overflow-y-auto"
       style={{ background: 'var(--surface)', borderLeft: '1px solid var(--border)' }}
     >
-      {/* Agent status */}
-      <div className="px-4 pt-4 pb-3 border-b" style={{ borderColor: 'var(--border)' }}>
-        <div className="flex items-center gap-2 mb-3">
-          <span className="h-2 w-2 rounded-full hermes-alive" style={{ background: accent }} />
-          <span className="font-mono text-xs font-medium" style={{ color: 'var(--ink)' }}>ARCANA</span>
-          <span className="font-mono text-2xs" style={{ color: accent }}>Hermes 3</span>
-        </div>
-
-        {stratName && (
-          <div
-            className="flex items-center justify-between px-3 py-2 rounded-sm"
-            style={{ background: `${accent}10`, border: `1px solid ${accent}25` }}
-          >
-            <div>
-              <div className="font-mono text-2xs uppercase tracking-widest" style={{ color: accent, opacity: 0.7 }}>Active Strategy</div>
-              <div className="font-mono text-sm font-medium mt-0.5" style={{ color: accent }}>{stratName}</div>
-            </div>
-            <div>
-              <div className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>{RISK[stratName]}</div>
-              <Link
-                href="/agent"
-                className="font-mono text-2xs mt-0.5 block transition-colors"
-                style={{ color: accent }}
-              >
-                Change →
-              </Link>
-            </div>
+      {/* Strategy status */}
+      <div className="px-4 pt-4 pb-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full hermes-alive" style={{ background: accent }} />
+            <span className="font-mono text-2xs font-medium" style={{ color: accent }}>
+              {stratName ?? 'No Strategy'}
+            </span>
           </div>
-        )}
+          {lastCycle && Number(lastCycle) > 0 && (
+            <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+              Last cycle {timeAgo(Number(lastCycle))}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>Vault TVL</div>
+            <div className="font-mono text-sm font-medium" style={{ color: 'var(--ink)' }}>${tvl}</div>
+          </div>
+          {userValue && (
+            <div className="text-right">
+              <div className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>My Deposit</div>
+              <div className="font-mono text-sm font-medium" style={{ color: accent }}>${userValue}</div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {/* Vault stats */}
-      <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
-        <div className="font-mono text-2xs uppercase tracking-widest mb-2.5" style={{ color: 'var(--ink-3)' }}>
-          Vault
+      {/* Direction toggle */}
+      <div className="px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
+        <div className="font-mono text-2xs uppercase tracking-widest mb-2" style={{ color: 'var(--ink-3)' }}>Side</div>
+        <div className="grid grid-cols-2 gap-1.5 p-1 rounded-sm" style={{ background: 'var(--surface-2)' }}>
+          <button
+            onClick={() => setDirection('long')}
+            disabled={false}
+            className="flex items-center justify-center gap-1.5 py-2 rounded-sm font-mono text-xs font-medium transition-all"
+            style={{
+              background: direction === 'long' ? 'rgba(29,184,122,0.12)' : 'transparent',
+              color: direction === 'long' ? 'var(--gain)' : 'var(--ink-3)',
+              border: direction === 'long' ? '1px solid rgba(29,184,122,0.25)' : '1px solid transparent',
+            }}
+          >
+            <ArrowUpRight size={12} />
+            Long
+          </button>
+          <button
+            onClick={() => !longOnly && setDirection('short')}
+            disabled={longOnly}
+            className="flex items-center justify-center gap-1.5 py-2 rounded-sm font-mono text-xs font-medium transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+            style={{
+              background: direction === 'short' ? 'rgba(201,78,78,0.12)' : 'transparent',
+              color: direction === 'short' ? 'var(--loss)' : 'var(--ink-3)',
+              border: direction === 'short' ? '1px solid rgba(201,78,78,0.25)' : '1px solid transparent',
+            }}
+          >
+            <ArrowDownRight size={12} />
+            Short
+            {longOnly && <span className="text-2xs opacity-50 ml-0.5">(locked)</span>}
+          </button>
         </div>
+      </div>
+
+      {/* Collateral input */}
+      <div className="px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-mono text-2xs uppercase tracking-widest" style={{ color: 'var(--ink-3)' }}>Collateral</span>
+          <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>USDC</span>
+        </div>
+        <div
+          className="flex items-center gap-2 px-3 py-2 rounded-sm"
+          style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+        >
+          <input
+            type="number"
+            value={collateral}
+            onChange={(e) => setCollateral(e.target.value)}
+            placeholder="0.00"
+            min="1"
+            className="flex-1 bg-transparent font-mono text-sm outline-none"
+            style={{ color: 'var(--ink)', caretColor: accent }}
+          />
+          <div className="flex gap-1">
+            {['10', '50', '100'].map((v) => (
+              <button
+                key={v}
+                onClick={() => setCollateral(v)}
+                className="font-mono text-2xs px-1.5 py-0.5 rounded-sm transition-all"
+                style={{
+                  color: collateral === v ? accent : 'var(--ink-3)',
+                  background: collateral === v ? `${accent}15` : 'transparent',
+                  border: `1px solid ${collateral === v ? `${accent}30` : 'transparent'}`,
+                }}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Leverage */}
+      <div className="px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-mono text-2xs uppercase tracking-widest" style={{ color: 'var(--ink-3)' }}>Leverage</span>
+          <span className="font-mono text-sm font-medium" style={{ color: accent }}>{effectiveLev}×</span>
+        </div>
+        <input
+          type="range"
+          min={1}
+          max={maxLev}
+          step={1}
+          value={effectiveLev}
+          onChange={(e) => setLeverage(Number(e.target.value))}
+          className="w-full accent-arc h-1.5 rounded-full appearance-none cursor-pointer"
+          style={{ accentColor: accent }}
+        />
+        <div className="flex justify-between mt-1.5">
+          {[1, ...leverageMarks.slice(1)].map((m) => (
+            <button
+              key={m}
+              onClick={() => setLeverage(m)}
+              className="font-mono text-2xs transition-all"
+              style={{
+                color: effectiveLev === m ? accent : 'var(--ink-3)',
+                fontWeight: effectiveLev === m ? 600 : 400,
+              }}
+            >
+              {m}×
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Position summary */}
+      <div className="px-4 py-3 border-b shrink-0" style={{ borderColor: 'var(--border)' }}>
         <div className="space-y-2">
           {[
-            { label: 'TVL', value: `$${tvl}` },
-            { label: 'Total Trades', value: totalTrades?.toString() ?? '—' },
-            { label: 'Last Cycle', value: lastCycle && Number(lastCycle) > 0 ? timeAgo(Number(lastCycle)) : '—' },
+            { label: 'Position Size', value: positionSize > 0 ? `$${fmtP(positionSize)}` : '—', color: 'var(--ink)' },
+            { label: 'Est. Entry', value: currentPrice ? `$${fmtP(currentPrice)}` : '—', color: 'var(--ink-2)' },
+            { label: 'Est. Liquidation', value: estLiq ? `$${fmtP(estLiq)}` : '—', color: '#e05555' },
+            { label: 'Max ROE', value: `${(effectiveLev * 100).toFixed(0)}%`, color: direction === 'long' ? 'var(--gain)' : 'var(--loss)' },
           ].map((row) => (
             <div key={row.label} className="flex items-center justify-between">
               <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>{row.label}</span>
-              <span className="font-mono text-xs" style={{ color: 'var(--ink)' }}>{row.value}</span>
+              <span className="font-mono text-xs tabular-nums" style={{ color: row.color }}>{row.value}</span>
             </div>
           ))}
         </div>
+      </div>
+
+      {/* Order button */}
+      <div className="px-4 py-4">
+        <button
+          onClick={handleOrder}
+          disabled={!collateralNum || collateralNum <= 0}
+          className="w-full flex items-center justify-center gap-2 py-3 rounded-sm font-mono text-xs tracking-widest uppercase transition-all disabled:opacity-40"
+          style={{
+            background: direction === 'long' ? 'rgba(29,184,122,0.12)' : 'rgba(201,78,78,0.12)',
+            color: direction === 'long' ? 'var(--gain)' : 'var(--loss)',
+            border: `1px solid ${direction === 'long' ? 'rgba(29,184,122,0.28)' : 'rgba(201,78,78,0.28)'}`,
+          }}
+          onMouseEnter={(e) => {
+            const el = e.currentTarget as HTMLElement
+            el.style.background = direction === 'long' ? 'rgba(29,184,122,0.2)' : 'rgba(201,78,78,0.2)'
+          }}
+          onMouseLeave={(e) => {
+            const el = e.currentTarget as HTMLElement
+            el.style.background = direction === 'long' ? 'rgba(29,184,122,0.12)' : 'rgba(201,78,78,0.12)'
+          }}
+        >
+          <Zap size={13} />
+          {direction === 'long' ? 'Long' : 'Short'} {asset} via ARCANA
+        </button>
+
+        <p className="font-mono text-2xs mt-2 text-center leading-relaxed" style={{ color: 'var(--ink-3)', opacity: 0.6 }}>
+          Routes to ARCANA agent · Hermes executes autonomously
+        </p>
+
         <Link
           href="/vault"
           className="mt-3 w-full flex items-center justify-center gap-1.5 font-mono text-2xs py-2 rounded-sm border transition-all"
-          style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.2)', background: 'rgba(110,95,240,0.05)' }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.1)' }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.05)' }}
+          style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.2)', background: 'rgba(110,95,240,0.04)' }}
+          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.08)' }}
+          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.04)' }}
         >
           Manage Vault →
         </Link>
-      </div>
-
-      {/* Quick actions */}
-      <div className="px-4 py-3 border-b" style={{ borderColor: 'var(--border)' }}>
-        <div className="font-mono text-2xs uppercase tracking-widest mb-2.5" style={{ color: 'var(--ink-3)' }}>
-          Quick Actions
-        </div>
-        <div className="space-y-2">
-          {quickActions.map((a) => (
-            <Link
-              key={a.msg}
-              href={`/app?msg=${encodeURIComponent(a.msg)}`}
-              className="w-full flex items-center justify-between px-3 py-2 rounded-sm font-mono text-2xs border transition-all"
-              style={{
-                color: a.color,
-                borderColor: `${a.color}20`,
-                background: `${a.color}08`,
-              }}
-              onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = `${a.color}15` }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = `${a.color}08` }}
-            >
-              <span>{a.label}</span>
-              <span style={{ opacity: 0.5 }}>→</span>
-            </Link>
-          ))}
-        </div>
-      </div>
-
-      {/* Chat CTA */}
-      <div className="px-4 py-4">
-        <Link
-          href="/app"
-          className="w-full flex items-center justify-center gap-2 py-3 rounded-sm font-mono text-xs tracking-widest uppercase transition-all"
-          style={{
-            background: 'var(--arc)',
-            color: '#fff',
-            boxShadow: '0 4px 16px rgba(110,95,240,0.3)',
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.opacity = '0.9' }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.opacity = '1' }}
-        >
-          <span className="arc-alive inline-block h-1.5 w-1.5 rounded-full bg-white/60" />
-          Open ARCANA Agent
-        </Link>
-        <p className="font-mono text-2xs mt-2 text-center leading-relaxed" style={{ color: 'var(--ink-3)' }}>
-          ARCANA manages positions autonomously based on your chosen strategy
-        </p>
       </div>
     </div>
   )
@@ -672,10 +863,15 @@ function ArcanaPanel({ asset }: { asset: Asset }) {
 
 export default function TradePage() {
   const { isConnected } = useAccount()
+  const router = useRouter()
   const [asset, setAsset] = useState<Asset>('ETH')
   const [tab, setTab] = useState<Tab>('positions')
-  const [closingId, setClosingId] = useState<bigint | null>(null)
   const [showOrderBook, setShowOrderBook] = useState(true)
+  const [closeConfirm, setCloseConfirm] = useState<{
+    id: bigint; marketStr: string; isLong: boolean
+  } | null>(null)
+
+  const { ticker } = useTicker(asset)
 
   const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSDT' : 'BINANCE:BTCUSDT'
   const bncSymbol = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
@@ -692,41 +888,49 @@ export default function TradePage() {
     query: { enabled: !!VAULT_ADDRESS },
   })
 
+  // Watch for position events → auto-refresh
+  useWatchContractEvent({
+    address: PERP_ENGINE_ADDRESS,
+    abi: PERP_ENGINE_ABI,
+    eventName: 'PositionOpened',
+    onLogs: () => refetchPositions(),
+  })
+  useWatchContractEvent({
+    address: PERP_ENGINE_ADDRESS,
+    abi: PERP_ENGINE_ABI,
+    eventName: 'PositionClosed',
+    onLogs: () => refetchPositions(),
+  })
+  useWatchContractEvent({
+    address: PERP_ENGINE_ADDRESS,
+    abi: PERP_ENGINE_ABI,
+    eventName: 'PositionLiquidated',
+    onLogs: () => refetchPositions(),
+  })
+
+  // Poll every 15s as fallback
   useEffect(() => {
-    const iv = setInterval(refetchPositions, 10_000)
+    const iv = setInterval(refetchPositions, 15_000)
     return () => clearInterval(iv)
   }, [refetchPositions])
 
-  const { writeContract, data: closeTx } = useWriteContract()
-  const { isSuccess: closeSuccess } = useWaitForTransactionReceipt({ hash: closeTx })
+  const handleRequestClose = useCallback((id: bigint, marketStr: string, isLong: boolean) => {
+    setCloseConfirm({ id, marketStr, isLong })
+  }, [])
 
-  useEffect(() => {
-    if (closeSuccess) { setClosingId(null); refetchPositions() }
-  }, [closeSuccess, refetchPositions])
-
-  const handleClose = useCallback(
-    async (positionId: bigint) => {
-      if (!VAULT_ADDRESS) return
-      setClosingId(positionId)
-      try {
-        writeContract({
-          address: VAULT_ADDRESS,
-          abi: VAULT_ABI,
-          functionName: 'closePosition' as never,
-          args: [positionId] as never,
-        })
-      } catch { setClosingId(null) }
-    },
-    [writeContract]
-  )
+  const handleConfirmClose = useCallback(() => {
+    if (!closeConfirm) return
+    const { id, marketStr, isLong } = closeConfirm
+    setCloseConfirm(null)
+    const msg = `Please close my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()} immediately`
+    router.push(`/app?msg=${encodeURIComponent(msg)}`)
+  }, [closeConfirm, router])
 
   const ids = positionIds ?? []
 
   if (!isConnected) {
     return (
-      <div
-        className="flex flex-col items-center justify-center min-h-[60vh] mx-auto max-w-md gap-6 px-4"
-      >
+      <div className="flex flex-col items-center justify-center min-h-[60vh] mx-auto max-w-md gap-6 px-4">
         <div
           className="h-16 w-16 rounded-full flex items-center justify-center"
           style={{ background: 'rgba(110,95,240,0.08)', border: '1px solid rgba(110,95,240,0.2)' }}
@@ -744,81 +948,83 @@ export default function TradePage() {
   }
 
   return (
-    <div
-      className="flex flex-col"
-      style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--bg)' }}
-    >
-      {/* Market header */}
-      <MarketHeader asset={asset} onSelect={setAsset} />
+    <>
+      {closeConfirm && (
+        <CloseConfirmModal
+          positionId={closeConfirm.id}
+          marketStr={closeConfirm.marketStr}
+          isLong={closeConfirm.isLong}
+          onConfirm={handleConfirmClose}
+          onCancel={() => setCloseConfirm(null)}
+        />
+      )}
 
-      {/* Main exchange area */}
-      <div className="flex flex-1 min-h-0 overflow-hidden">
+      <div
+        className="flex flex-col"
+        style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--bg)' }}
+      >
+        {/* Market header */}
+        <MarketHeader asset={asset} onSelect={setAsset} />
 
-        {/* Order book (collapsible) */}
-        {showOrderBook && (
-          <div
-            className="border-r shrink-0"
-            style={{ width: '200px', borderColor: 'var(--border)', overflow: 'hidden' }}
-          >
-            <OrderBook symbol={bncSymbol as 'ETHUSDT' | 'BTCUSDT'} />
-          </div>
-        )}
+        {/* Main exchange area */}
+        <div className="flex flex-1 min-h-0 overflow-hidden">
 
-        {/* Chart */}
-        <div className="flex flex-col flex-1 min-w-0">
-          {/* Chart toolbar */}
-          <div
-            className="flex items-center gap-3 px-3 py-1.5 border-b shrink-0"
-            style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '36px' }}
-          >
-            <button
-              onClick={() => setShowOrderBook((v) => !v)}
-              className="flex items-center gap-1.5 font-mono text-2xs px-2 py-1 rounded-sm border transition-all"
-              style={{
-                color: showOrderBook ? 'var(--arc)' : 'var(--ink-3)',
-                borderColor: showOrderBook ? 'rgba(110,95,240,0.25)' : 'var(--border)',
-                background: showOrderBook ? 'rgba(110,95,240,0.06)' : 'transparent',
-              }}
+          {/* Order book */}
+          {showOrderBook && (
+            <div className="border-r shrink-0" style={{ width: '200px', borderColor: 'var(--border)', overflow: 'hidden' }}>
+              <OrderBook symbol={bncSymbol as 'ETHUSDT' | 'BTCUSDT'} />
+            </div>
+          )}
+
+          {/* Chart area */}
+          <div className="flex flex-col flex-1 min-w-0">
+            <div
+              className="flex items-center gap-3 px-3 py-1.5 border-b shrink-0"
+              style={{ background: 'var(--surface)', borderColor: 'var(--border)', height: '36px' }}
             >
-              {showOrderBook ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
-              Order Book
-            </button>
-            <div className="h-3 w-px" style={{ background: 'var(--border)' }} />
-            <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
-              {tvSymbol} · TradingView
-            </span>
-            <div className="flex-1" />
-            <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
-              {ids.length} position{ids.length !== 1 ? 's' : ''} open
-            </span>
+              <button
+                onClick={() => setShowOrderBook((v) => !v)}
+                className="flex items-center gap-1.5 font-mono text-2xs px-2 py-1 rounded-sm border transition-all"
+                style={{
+                  color: showOrderBook ? 'var(--arc)' : 'var(--ink-3)',
+                  borderColor: showOrderBook ? 'rgba(110,95,240,0.25)' : 'var(--border)',
+                  background: showOrderBook ? 'rgba(110,95,240,0.06)' : 'transparent',
+                }}
+              >
+                {showOrderBook ? <ChevronDown size={10} /> : <ChevronUp size={10} />}
+                Order Book
+              </button>
+              <div className="h-3 w-px" style={{ background: 'var(--border)' }} />
+              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+                {tvSymbol} · TradingView
+              </span>
+              <div className="flex-1" />
+              <span className="font-mono text-2xs" style={{ color: 'var(--ink-3)' }}>
+                {ids.length} position{ids.length !== 1 ? 's' : ''} open
+              </span>
+            </div>
+
+            <div className="flex-1 min-h-0">
+              <TVChart symbol={tvSymbol} interval="60" />
+            </div>
           </div>
 
-          {/* TradingView chart */}
-          <div className="flex-1 min-h-0">
-            <TVChart symbol={tvSymbol} interval="15" />
+          {/* Order panel */}
+          <div className="shrink-0 overflow-y-auto" style={{ width: '260px' }}>
+            <OrderPanel asset={asset} ticker={ticker} />
           </div>
         </div>
 
-        {/* ARCANA panel */}
-        <div
-          className="shrink-0 overflow-y-auto"
-          style={{ width: '260px', borderLeft: '1px solid var(--border)' }}
-        >
-          <ArcanaPanel asset={asset} />
-        </div>
+        {/* Positions panel */}
+        <PositionsPanel
+          tab={tab}
+          onTabChange={setTab}
+          positionIds={ids}
+          isLoading={posLoading}
+          onRefresh={refetchPositions}
+          onRequestClose={handleRequestClose}
+        />
       </div>
-
-      {/* Positions panel */}
-      <PositionsPanel
-        tab={tab}
-        onTabChange={setTab}
-        positionIds={ids}
-        asset={asset}
-        onClose={handleClose}
-        closingId={closingId}
-        isLoading={posLoading}
-        onRefresh={refetchPositions}
-      />
-    </div>
+    </>
   )
 }
