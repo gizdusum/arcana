@@ -1,0 +1,255 @@
+export const VAULT_ABI = [
+  {
+    type: 'function',
+    name: 'executeOpen',
+    inputs: [
+      { name: 'market', type: 'bytes32' },
+      { name: 'isLong', type: 'bool' },
+      { name: 'collateralAmount', type: 'uint256' },
+      { name: 'leverage', type: 'uint8' },
+    ],
+    outputs: [{ name: 'positionId', type: 'uint256' }],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'executeClose',
+    inputs: [{ name: 'positionId', type: 'uint256' }],
+    outputs: [{ name: 'pnl', type: 'int256' }],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'logDecision',
+    inputs: [{ name: 'reasoning', type: 'string' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'setStrategy',
+    inputs: [{ name: 'newStrategy', type: 'uint8' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'activeStrategy',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'hermesAgent',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'totalAssets',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'lastHermesCycle',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'approveEngine',
+    inputs: [{ name: 'amount', type: 'uint256' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'totalTradesExecuted',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'event',
+    name: 'HermesDecisionLogged',
+    inputs: [
+      { name: 'reasoning', type: 'string', indexed: false },
+      { name: 'timestamp', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'PositionExecuted',
+    inputs: [
+      { name: 'market', type: 'bytes32', indexed: true },
+      { name: 'isLong', type: 'bool', indexed: false },
+      { name: 'positionId', type: 'uint256', indexed: false },
+      { name: 'leverage', type: 'uint8', indexed: false },
+    ],
+  },
+] as const
+
+export const PERP_ENGINE_ABI = [
+  {
+    type: 'function',
+    name: 'getVaultOpenPositions',
+    inputs: [{ name: 'vault', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256[]' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'positions',
+    inputs: [{ name: 'positionId', type: 'uint256' }],
+    outputs: [
+      { name: 'id', type: 'uint256' },
+      { name: 'vault', type: 'address' },
+      { name: 'market', type: 'bytes32' },
+      { name: 'isLong', type: 'bool' },
+      { name: 'size', type: 'uint256' },
+      { name: 'entryPrice', type: 'uint256' },
+      { name: 'leverage', type: 'uint8' },
+      { name: 'collateral', type: 'uint256' },
+      { name: 'openedAt', type: 'uint256' },
+      { name: 'isOpen', type: 'bool' },
+      { name: 'fundingAccrued', type: 'int256' },
+    ],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'getUnrealizedPnL',
+    inputs: [{ name: 'positionId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'int256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'isLiquidatable',
+    inputs: [{ name: 'positionId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'nextPositionId',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'fundingRatePerHour',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+] as const
+
+export const ORACLE_ABI = [
+  {
+    type: 'function',
+    name: 'updateMockPrice',
+    inputs: [
+      { name: 'market', type: 'bytes32' },
+      { name: 'price', type: 'int256' },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'getPrice',
+    inputs: [{ name: 'market', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'int256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'isMockMode',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'mockPrices',
+    inputs: [{ name: 'market', type: 'bytes32' }],
+    outputs: [{ name: '', type: 'int256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'setHermesAgent',
+    inputs: [{ name: 'agent', type: 'address' }],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'hermesAgent',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'event',
+    name: 'MockPriceUpdated',
+    inputs: [
+      { name: 'market', type: 'bytes32', indexed: true },
+      { name: 'price', type: 'int256', indexed: false },
+    ],
+  },
+] as const
+
+export const USDC_ABI = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    inputs: [{ name: 'account', type: 'address' }],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'approve',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'allowance',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'decimals',
+    inputs: [],
+    outputs: [{ name: '', type: 'uint8' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'transfer',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+    stateMutability: 'nonpayable',
+  },
+] as const
