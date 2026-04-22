@@ -1,13 +1,12 @@
 'use client'
 export const dynamic = 'force-dynamic'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   useAccount,
   useReadContract,
-  useWriteContract,
-  useWaitForTransactionReceipt,
+  useReadContracts,
   useWatchContractEvent,
 } from 'wagmi'
 import Link from 'next/link'
@@ -876,17 +875,49 @@ export default function TradePage() {
   const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSDT' : 'BINANCE:BTCUSDT'
   const bncSymbol = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
 
-  const {
-    data: positionIds,
-    isLoading: posLoading,
-    refetch: refetchPositions,
-  } = useReadContract({
+  // Step 1: get total position count
+  const { data: nextPosIdData, refetch: refetchNextPosId } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
-    functionName: 'getVaultOpenPositions',
-    args: VAULT_ADDRESS ? [VAULT_ADDRESS] : undefined,
-    query: { enabled: !!VAULT_ADDRESS },
+    functionName: 'nextPositionId',
   })
+  const scanCount = Math.min(Number(nextPosIdData ?? 0), 50)
+
+  // Step 2: batch-read every position (reliable regardless of vaultPositions mapping)
+  const positionContracts = useMemo(
+    () =>
+      Array.from({ length: scanCount }, (_, i) => ({
+        address: PERP_ENGINE_ADDRESS as `0x${string}`,
+        abi: PERP_ENGINE_ABI,
+        functionName: 'positions' as const,
+        args: [BigInt(i)] as const,
+      })),
+    [scanCount]
+  )
+
+  const { data: allPositionsData, isLoading: posLoading, refetch: refetchAllPos } = useReadContracts({
+    contracts: positionContracts,
+    query: { enabled: scanCount > 0 },
+  })
+
+  // Step 3: filter to vault's open positions
+  const ids = useMemo(() => {
+    if (!allPositionsData) return [] as bigint[]
+    return allPositionsData
+      .filter((r) => r.status === 'success' && r.result)
+      .map((r) => r.result as readonly [bigint, `0x${string}`, `0x${string}`, boolean, bigint, bigint, number, bigint, bigint, boolean, bigint])
+      .filter(
+        (pos) =>
+          pos[1].toLowerCase() === VAULT_ADDRESS.toLowerCase() &&
+          pos[9] === true
+      )
+      .map((pos) => pos[0])
+  }, [allPositionsData])
+
+  const refetchPositions = useCallback(() => {
+    refetchNextPosId()
+    refetchAllPos()
+  }, [refetchNextPosId, refetchAllPos])
 
   // Watch for position events → auto-refresh
   useWatchContractEvent({
@@ -925,8 +956,6 @@ export default function TradePage() {
     const msg = `Please close my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()} immediately`
     router.push(`/app?msg=${encodeURIComponent(msg)}`)
   }, [closeConfirm, router])
-
-  const ids = positionIds ?? []
 
   if (!isConnected) {
     return (

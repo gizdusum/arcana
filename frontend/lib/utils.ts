@@ -53,14 +53,18 @@ export function formatLeverage(leverage: number): string {
 
 // ─── Market bytes32 → human readable ─────────────────────────────────────────
 
-const MARKET_MAP: Record<string, string> = {
-  // keccak256("BTC/USD") hex prefix matching
-  '0x4254432f555344': 'BTC/USD',
-  '0x4554482f555344': 'ETH/USD',
+// keccak256(toBytes('ETH/USD')) and keccak256(toBytes('BTC/USD')) — same as agent/src/oracle.ts
+const KECCAK_MARKET_MAP: Record<string, string> = {
+  '0x0b43555ace6b39aae1b894097d0a9fc17f504c62fea598fa206cc6f5088e6e45': 'ETH/USD',
+  '0xee62665949c883f9e0f6f002eac32e00bd59dfe6c34e92a91c37d6a8322d6489': 'BTC/USD',
 }
 
 export function formatMarket(market: `0x${string}`): string {
-  // Try hex decode
+  // Check keccak256 hashes first (these are what the agent uses)
+  const lower = market.toLowerCase()
+  if (KECCAK_MARKET_MAP[lower]) return KECCAK_MARKET_MAP[lower]
+
+  // Try ASCII hex decode (legacy / raw bytes32)
   try {
     const hex = market.replace('0x', '')
     const bytes = hex.match(/.{1,2}/g) || []
@@ -74,11 +78,8 @@ export function formatMarket(market: `0x${string}`): string {
     // ignore
   }
 
-  // Check known markets
-  if (MARKET_MAP[market.toLowerCase()]) return MARKET_MAP[market.toLowerCase()]
-
   // Fallback: short hex
-  return `${market.slice(0, 8)}...`
+  return `${market.slice(0, 10)}…`
 }
 
 // ─── Time formatting ──────────────────────────────────────────────────────────
