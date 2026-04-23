@@ -2,7 +2,7 @@
 export const dynamic = 'force-dynamic'
 
 import { useState, useEffect } from 'react'
-import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
+import { useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
 import { parseUnits } from 'viem'
 import Link from 'next/link'
 import { VaultCard } from '@/components/VaultCard'
@@ -90,12 +90,14 @@ function HermesStatusBar() {
 
 function DepositForm() {
   const { address } = useAccount()
+  const publicClient = usePublicClient()
   const [amount, setAmount] = useState('')
-  const [depositSuccess, setDepositSuccess] = useState(false)
+  const [status, setStatus] = useState<'idle' | 'approving' | 'depositing' | 'success' | 'error'>('idle')
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   const amountBigint = amount ? parseUnits(amount, 6) : 0n
 
-  const { data: usdcBalance } = useReadContract({
+  const { data: usdcBalance, refetch: refetchUsdcBalance } = useReadContract({
     address: USDC_ADDRESS,
     abi: USDC_ABI,
     functionName: 'balanceOf',
@@ -111,57 +113,84 @@ function DepositForm() {
     query: { enabled: !!address && !!VAULT_ADDRESS },
   })
 
-  const { writeContract: writeApprove, data: approveTx, isPending: approving } = useWriteContract()
-  const { writeContract: writeDeposit, data: depositTx, isPending: depositing } = useWriteContract()
-
-  const { isSuccess: approveSuccess, isLoading: waitApprove } = useWaitForTransactionReceipt({
-    hash: approveTx,
-  })
-  const { isSuccess: depositDone, isLoading: waitDeposit } = useWaitForTransactionReceipt({
-    hash: depositTx,
-  })
+  const { writeContractAsync } = useWriteContract()
 
   useEffect(() => {
-    if (approveSuccess && address && amountBigint > 0n && VAULT_ADDRESS) {
-      writeDeposit({
+    if (status !== 'success') return
+    const timer = setTimeout(() => setStatus('idle'), 4000)
+    return () => clearTimeout(timer)
+  }, [status])
+
+  const needsApproval = !allowance || allowance < amountBigint
+  const isLoading = status === 'approving' || status === 'depositing'
+  const canDeposit = !!address && amountBigint > 0n && !!VAULT_ADDRESS && !isLoading
+
+  const handleDeposit = async () => {
+    if (!canDeposit) return
+
+    if (!publicClient) {
+      setStatus('error')
+      setErrorMessage('RPC client unavailable — please reconnect your wallet.')
+      return
+    }
+
+    // Reset any previous error before retrying
+    setErrorMessage(null)
+
+    try {
+      if (needsApproval) {
+        setStatus('approving')
+        const approveHash = await writeContractAsync({
+          address: USDC_ADDRESS,
+          abi: USDC_ABI,
+          functionName: 'approve',
+          args: [VAULT_ADDRESS, amountBigint],
+        })
+        const approveReceipt = await publicClient.waitForTransactionReceipt({
+          hash: approveHash,
+          timeout: 90_000, // 90s — Arc Testnet can be slow
+        })
+        if (approveReceipt.status === 'reverted') {
+          throw new Error('Approve transaction was reverted on-chain.')
+        }
+        await refetchAllowance()
+      }
+
+      setStatus('depositing')
+      const depositHash = await writeContractAsync({
         address: VAULT_ADDRESS,
         abi: VAULT_ABI,
         functionName: 'deposit',
         args: [amountBigint, address],
       })
-      refetchAllowance()
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [approveSuccess])
+      const depositReceipt = await publicClient.waitForTransactionReceipt({
+        hash: depositHash,
+        timeout: 90_000,
+      })
+      if (depositReceipt.status === 'reverted') {
+        throw new Error(
+          'Deposit reverted on-chain. The vault may be private or have insufficient liquidity.'
+        )
+      }
 
-  useEffect(() => {
-    if (depositDone) {
       setAmount('')
-      setDepositSuccess(true)
-      setTimeout(() => setDepositSuccess(false), 4000)
-    }
-  }, [depositDone])
-
-  const needsApproval = !allowance || allowance < amountBigint
-  const isLoading = approving || depositing || waitApprove || waitDeposit
-  const canDeposit = !!address && amountBigint > 0n && !!VAULT_ADDRESS && !isLoading
-
-  const handleDeposit = () => {
-    if (!canDeposit) return
-    if (needsApproval) {
-      writeApprove({
-        address: USDC_ADDRESS,
-        abi: USDC_ABI,
-        functionName: 'approve',
-        args: [VAULT_ADDRESS, amountBigint],
-      })
-    } else {
-      writeDeposit({
-        address: VAULT_ADDRESS,
-        abi: VAULT_ABI,
-        functionName: 'deposit',
-        args: [amountBigint, address!],
-      })
+      setStatus('success')
+      await Promise.all([refetchAllowance(), refetchUsdcBalance()])
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error)
+      const isRejected =
+        raw.toLowerCase().includes('reject') ||
+        raw.toLowerCase().includes('denied') ||
+        raw.toLowerCase().includes('cancelled') ||
+        raw.toLowerCase().includes('user refused')
+      setStatus('error')
+      setErrorMessage(
+        isRejected
+          ? 'Transaction cancelled by user.'
+          : raw.length > 120
+          ? raw.slice(0, 120) + '…'
+          : raw
+      )
     }
   }
 
@@ -211,25 +240,37 @@ function DepositForm() {
       >
         {!address
           ? 'Connect Wallet'
-          : approving || waitApprove
+          : status === 'approving'
           ? 'Approving...'
-          : depositing || waitDeposit
+          : status === 'depositing'
           ? 'Depositing...'
-          : depositSuccess
+          : status === 'success'
           ? 'Deposited'
           : needsApproval
           ? 'Approve & Deposit'
           : 'Deposit'}
       </button>
 
-      {(approving || waitApprove) && (
+      {status === 'approving' && (
         <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 1/2 — approve USDC spend</p>
       )}
-      {(depositing || waitDeposit) && (
+      {status === 'depositing' && (
         <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 2/2 — depositing into vault</p>
       )}
-      {depositSuccess && (
+      {status === 'success' && (
         <p className="mt-2 font-mono text-2xs text-gain text-center">Deposit confirmed</p>
+      )}
+      {status === 'error' && errorMessage && (
+        <div className="mt-2 text-center">
+          <p className="font-mono text-2xs text-loss">{errorMessage}</p>
+          <button
+            onClick={() => { setStatus('idle'); setErrorMessage(null) }}
+            className="mt-1 font-mono text-2xs underline"
+            style={{ color: 'var(--ink-3)' }}
+          >
+            Try again
+          </button>
+        </div>
       )}
     </div>
   )
