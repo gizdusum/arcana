@@ -1,13 +1,11 @@
 'use client'
 export const dynamic = 'force-dynamic'
 
-import { useState, useEffect, useCallback, useMemo } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import {
   useAccount,
   useReadContract,
-  useReadContracts,
-  useWatchContractEvent,
 } from 'wagmi'
 import Link from 'next/link'
 import nextDynamic from 'next/dynamic'
@@ -18,6 +16,7 @@ import {
   VAULT_ABI,
 } from '@/lib/contracts'
 import { formatMarket, timeAgo } from '@/lib/utils'
+import { useOpenPositionIds } from '@/lib/useOpenPositionIds'
 import { ChevronDown, ChevronUp, ExternalLink, RefreshCw, ArrowUpRight, ArrowDownRight, Zap } from 'lucide-react'
 
 const TVChart = nextDynamic(
@@ -213,9 +212,11 @@ function useMarkPrice(market: string | null) {
 function PositionRow({
   positionId,
   onRequestClose,
+  onRequestAdjust,
 }: {
   positionId: bigint
   onRequestClose: (id: bigint, marketStr: string, isLong: boolean) => void
+  onRequestAdjust: (id: bigint, marketStr: string, isLong: boolean) => void
 }) {
   const { data: pos, refetch: refetchPos } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
@@ -370,19 +371,34 @@ function PositionRow({
 
       {/* Action */}
       <td className="px-3 py-2.5">
-        <button
-          onClick={() => onRequestClose(posId, marketStr, isLong)}
-          className="font-mono text-2xs px-2.5 py-1.5 rounded-sm transition-all"
-          style={{
-            color: '#e05555',
-            border: '1px solid rgba(201,78,78,0.25)',
-            background: 'rgba(201,78,78,0.05)',
-          }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.12)' }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.05)' }}
-        >
-          Close
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => onRequestAdjust(posId, marketStr, isLong)}
+            className="font-mono text-2xs px-2.5 py-1.5 rounded-sm transition-all"
+            style={{
+              color: 'var(--arc)',
+              border: '1px solid rgba(110,95,240,0.25)',
+              background: 'rgba(110,95,240,0.05)',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.12)' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(110,95,240,0.05)' }}
+          >
+            Revise
+          </button>
+          <button
+            onClick={() => onRequestClose(posId, marketStr, isLong)}
+            className="font-mono text-2xs px-2.5 py-1.5 rounded-sm transition-all"
+            style={{
+              color: '#e05555',
+              border: '1px solid rgba(201,78,78,0.25)',
+              background: 'rgba(201,78,78,0.05)',
+            }}
+            onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.12)' }}
+            onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(201,78,78,0.05)' }}
+          >
+            Close
+          </button>
+        </div>
       </td>
     </tr>
   )
@@ -473,6 +489,7 @@ function PositionsPanel({
   isLoading,
   onRefresh,
   onRequestClose,
+  onRequestAdjust,
 }: {
   tab: Tab
   onTabChange: (t: Tab) => void
@@ -480,6 +497,7 @@ function PositionsPanel({
   isLoading: boolean
   onRefresh: () => void
   onRequestClose: (id: bigint, marketStr: string, isLong: boolean) => void
+  onRequestAdjust: (id: bigint, marketStr: string, isLong: boolean) => void
 }) {
   return (
     <div
@@ -563,6 +581,7 @@ function PositionsPanel({
                     key={id.toString()}
                     positionId={id}
                     onRequestClose={onRequestClose}
+                    onRequestAdjust={onRequestAdjust}
                   />
                 ))}
               </tbody>
@@ -874,80 +893,16 @@ export default function TradePage() {
 
   const tvSymbol = asset === 'ETH' ? 'BINANCE:ETHUSDT' : 'BINANCE:BTCUSDT'
   const bncSymbol = asset === 'ETH' ? 'ETHUSDT' : 'BTCUSDT'
-
-  // Step 1: get total position count
-  const { data: nextPosIdData, refetch: refetchNextPosId } = useReadContract({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    functionName: 'nextPositionId',
-  })
-  const scanCount = Math.min(Number(nextPosIdData ?? 0), 50)
-
-  // Step 2: batch-read every position (reliable regardless of vaultPositions mapping)
-  const positionContracts = useMemo(
-    () =>
-      Array.from({ length: scanCount }, (_, i) => ({
-        address: PERP_ENGINE_ADDRESS as `0x${string}`,
-        abi: PERP_ENGINE_ABI,
-        functionName: 'positions' as const,
-        args: [BigInt(i)] as const,
-      })),
-    [scanCount]
-  )
-
-  const { data: allPositionsData, isLoading: posLoading, refetch: refetchAllPos } = useReadContracts({
-    contracts: positionContracts,
-    query: { enabled: scanCount > 0 },
-  })
-
-  // Step 3: filter to vault's open positions
-  const ids = useMemo(() => {
-    if (!allPositionsData) return [] as bigint[]
-    return allPositionsData
-      .filter((r) => r.status === 'success' && r.result)
-      .map((r) => r.result as readonly [bigint, `0x${string}`, `0x${string}`, boolean, bigint, bigint, number, bigint, bigint, boolean, bigint])
-      .filter(
-        (pos) =>
-          pos[1].toLowerCase() === VAULT_ADDRESS.toLowerCase() &&
-          pos[9] === true
-      )
-      .map((pos) => pos[0])
-  }, [allPositionsData])
-
-  const refetchPositions = useCallback(() => {
-    refetchNextPosId()
-    refetchAllPos()
-  }, [refetchNextPosId, refetchAllPos])
-
-  // Watch for position events → auto-refresh
-  useWatchContractEvent({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    eventName: 'PositionOpened',
-    onLogs: () => refetchPositions(),
-  })
-  useWatchContractEvent({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    eventName: 'PositionClosed',
-    onLogs: () => refetchPositions(),
-  })
-  useWatchContractEvent({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    eventName: 'PositionLiquidated',
-    onLogs: () => refetchPositions(),
-  })
-
-  // Poll every 15s as fallback
-  useEffect(() => {
-    const iv = setInterval(refetchPositions, 15_000)
-    return () => clearInterval(iv)
-  }, [refetchPositions])
+  const { ids, isLoading: posLoading, refetch: refetchPositions } = useOpenPositionIds(VAULT_ADDRESS)
 
   const handleRequestClose = useCallback((id: bigint, marketStr: string, isLong: boolean) => {
     setCloseConfirm({ id, marketStr, isLong })
   }, [])
+
+  const handleRequestAdjust = useCallback((id: bigint, marketStr: string, isLong: boolean) => {
+    const msg = `Please revise my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()} and suggest the best adjustment`
+    router.push(`/app?msg=${encodeURIComponent(msg)}`)
+  }, [router])
 
   const handleConfirmClose = useCallback(() => {
     if (!closeConfirm) return
@@ -1052,6 +1007,7 @@ export default function TradePage() {
           isLoading={posLoading}
           onRefresh={refetchPositions}
           onRequestClose={handleRequestClose}
+          onRequestAdjust={handleRequestAdjust}
         />
       </div>
     </>
