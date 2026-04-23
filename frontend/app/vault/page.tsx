@@ -159,14 +159,29 @@ function DepositForm() {
         if (!alive) return
         try {
           const receipt = await publicClient.getTransactionReceipt({ hash: pendingHash! })
-          if (!receipt) continue
+          // Require an explicitly mined block — some RPC nodes return partial receipts for pending txs
+          if (!receipt || receipt.blockNumber == null) continue
           if (receipt.status === 'reverted') {
             setStatus('error')
             setErrorMessage('Deposit reverted on-chain.')
             setPendingHash(null)
             return
           }
-          // success
+          if (receipt.status !== 'success') continue
+          // Confirmed mined success — verify vault shares actually increased
+          const sharesAfter = await publicClient.readContract({
+            address: VAULT_ADDRESS,
+            abi: VAULT_ABI,
+            functionName: 'balanceOf',
+            args: [address!],
+          })
+          if (!sharesAfter || sharesAfter === 0n) {
+            // Receipt says success but no shares — something is wrong on-chain
+            setStatus('error')
+            setErrorMessage('Transaction mined but vault shares not received. Check ArcScan.')
+            setPendingHash(null)
+            return
+          }
           setAmount('')
           setStatus('success')
           setPendingHash(null)
