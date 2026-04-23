@@ -4,7 +4,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
 import { useAccount, useReadContract, useSwitchChain } from 'wagmi'
 import { getWalletClient } from 'wagmi/actions'
-import { parseUnits, encodeFunctionData } from 'viem'
+import { parseUnits, encodeFunctionData, parseGwei } from 'viem'
 import Link from 'next/link'
 import { VAULT_ADDRESS, USDC_ADDRESS, VAULT_ABI, USDC_ABI } from '@/lib/contracts'
 import { wagmiConfig, arcTestnet } from '@/lib/wagmi'
@@ -713,11 +713,15 @@ export function ArcanaTerminal() {
         const ah = await wc.sendTransaction({
           to: USDC_ADDRESS,
           data: encodeFunctionData({ abi: USDC_ABI, functionName: 'approve', args: [VAULT_ADDRESS, amount] }),
+          gasPrice: parseGwei('55'),
+          gas: 100_000n,
         })
         addMsg({ role: 'system', content: `Approved (${ah.slice(0, 10)}...) — depositing...` })
         const dh = await wc.sendTransaction({
           to: VAULT_ADDRESS,
           data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'deposit', args: [amount, address] }),
+          gasPrice: parseGwei('55'),
+          gas: 300_000n,
         })
         addMsg({ role: 'system', content: `Deposited (${dh.slice(0, 10)}...) → Vault` })
         setTimeout(() => router.push('/vault'), 1500)
@@ -726,6 +730,8 @@ export function ArcanaTerminal() {
         const h = await wc.sendTransaction({
           to: VAULT_ADDRESS,
           data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'requestWithdraw', args: [shares] }),
+          gasPrice: parseGwei('55'),
+          gas: 200_000n,
         })
         addMsg({ role: 'system', content: `Withdrawal requested (${h.slice(0, 10)}...)` })
       } else if (proposal.action === 'change_strategy' && proposal.strategy) {
@@ -733,6 +739,8 @@ export function ArcanaTerminal() {
         const h = await wc.sendTransaction({
           to: VAULT_ADDRESS,
           data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'setStrategy', args: [idx[proposal.strategy]] }),
+          gasPrice: parseGwei('55'),
+          gas: 100_000n,
         })
         setSelectedStrategy(proposal.strategy)
         addMsg({ role: 'system', content: `Strategy → ${proposal.strategy} (${h.slice(0, 10)}...)` })
@@ -745,6 +753,8 @@ export function ArcanaTerminal() {
           await wc.sendTransaction({
             to: VAULT_ADDRESS,
             data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'setStrategy', args: [idx[newStrat]] }),
+            gasPrice: parseGwei('55'),
+            gas: 100_000n,
           })
           setSelectedStrategy(newStrat)
         }
