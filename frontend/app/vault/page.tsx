@@ -3,7 +3,7 @@ export const dynamic = 'force-dynamic'
 
 import { useState, useEffect } from 'react'
 import { useAccount, usePublicClient, useReadContract, useWriteContract } from 'wagmi'
-import { parseUnits } from 'viem'
+import { parseUnits, parseGwei } from 'viem'
 import Link from 'next/link'
 import { VaultCard } from '@/components/VaultCard'
 import { PnLChart } from '@/components/PnLChart'
@@ -145,6 +145,7 @@ function DepositForm() {
           abi: USDC_ABI,
           functionName: 'approve',
           args: [VAULT_ADDRESS, amountBigint],
+          gasPrice: parseGwei('55'),
         })
         const approveReceipt = await publicClient.waitForTransactionReceipt({
           hash: approveHash,
@@ -162,6 +163,7 @@ function DepositForm() {
         abi: VAULT_ABI,
         functionName: 'deposit',
         args: [amountBigint, address],
+        gasPrice: parseGwei('55'),
       })
       const depositReceipt = await publicClient.waitForTransactionReceipt({
         hash: depositHash,
@@ -486,11 +488,13 @@ export default function VaultPage() {
         <div className="space-y-4">
           <HermesStatusBar />
           <PnLChart />
-          <PositionTable />
           <QuickStats />
           <AgentLog limit={4} showViewAll={true} />
         </div>
       </div>
+
+      {/* Open positions — full width at bottom */}
+      <PositionTable />
     </div>
   )
 }

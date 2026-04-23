@@ -1,5 +1,6 @@
 'use client'
 
+import { useEffect, useState } from 'react'
 import { useReadContract } from 'wagmi'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
@@ -7,30 +8,54 @@ import { VAULT_ADDRESS, PERP_ENGINE_ABI, PERP_ENGINE_ADDRESS } from '@/lib/contr
 import { formatMarket, formatPrice, timeAgo } from '@/lib/utils'
 import { useOpenPositionIds } from '@/lib/useOpenPositionIds'
 
+function useLivePrice(marketStr: string) {
+  const [price, setPrice] = useState<number | null>(null)
+  useEffect(() => {
+    if (!marketStr) return
+    const sym = marketStr.includes('BTC') ? 'btcusdt' : 'ethusdt'
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@miniTicker`)
+    ws.onmessage = (e) => {
+      try { setPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
+    }
+    ws.onerror = () => ws.close()
+    return () => ws.close()
+  }, [marketStr])
+  return price
+}
+
 interface PositionRowProps {
   positionId: bigint
 }
 
 function PositionRow({ positionId }: PositionRowProps) {
   const router = useRouter()
-  const { data: pos, isLoading } = useReadContract({
+  const { data: pos, isLoading, refetch: refetchPos } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
     functionName: 'positions',
     args: [positionId],
   })
 
-  const { data: pnl } = useReadContract({
+  const { data: pnl, refetch: refetchPnl } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
     functionName: 'getUnrealizedPnL',
     args: [positionId],
   })
 
+  const marketStr = pos ? formatMarket(pos[2] as `0x${string}`) : ''
+  const markPrice = useLivePrice(marketStr)
+
+  useEffect(() => {
+    if (!pos) return
+    const iv = setInterval(() => { refetchPos(); refetchPnl() }, 5_000)
+    return () => clearInterval(iv)
+  }, [pos, refetchPos, refetchPnl])
+
   if (isLoading || !pos) {
     return (
       <tr>
-        <td colSpan={7} className="px-4 py-3">
+        <td colSpan={8} className="px-4 py-3">
           <div className="h-4 bg-surface-2 animate-pulse rounded-sm" />
         </td>
       </tr>
@@ -47,6 +72,10 @@ function PositionRow({ positionId }: PositionRowProps) {
       ? ((pnlNum / (Number(collateral) / 1e6)) * 100).toFixed(2)
       : '0.00'
   const pnlSign = pnlNum >= 0 ? '+' : ''
+  const entryNum = Number(entryPrice) / 1e8
+  const levNum = Number(leverage)
+  const liqBuffer = 1 / levNum
+  const liqPrice = isLong ? entryNum * (1 - liqBuffer) : entryNum * (1 + liqBuffer)
 
   const sizeFormatted = (Number(size) / 1e6).toLocaleString('en-US', {
     style: 'currency',
@@ -54,37 +83,41 @@ function PositionRow({ positionId }: PositionRowProps) {
     maximumFractionDigits: 2,
   })
 
+  const fmtP = (n: number) => `$${n.toLocaleString('en-US', { maximumFractionDigits: 2 })}`
+
   return (
     <tr className="border-t border-[#1c2540] hover:bg-surface-2 transition-colors">
-      <td className="px-4 py-3 font-mono text-xs text-ink">
-        {formatMarket(market as `0x${string}`)}
-      </td>
       <td className="px-4 py-3">
-        <span className={`font-mono text-xs font-medium ${isLong ? 'text-gain' : 'text-loss'}`}>
-          {isLong ? 'LONG' : 'SHORT'}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={`font-mono text-2xs px-1.5 py-0.5 rounded-sm font-bold ${isLong ? 'text-gain' : 'text-loss'}`}
+            style={{ background: isLong ? 'rgba(29,184,122,0.1)' : 'rgba(201,78,78,0.1)', border: `1px solid ${isLong ? 'rgba(29,184,122,0.2)' : 'rgba(201,78,78,0.2)'}` }}>
+            {isLong ? 'LONG' : 'SHORT'}
+          </span>
+          <span className="font-mono text-xs text-ink">{marketStr}</span>
+        </div>
+        <div className="font-mono text-2xs text-ink-3 mt-0.5">#{id.toString()} · {timeAgo(Number(openedAt))}</div>
       </td>
       <td className="px-4 py-3 font-mono text-xs text-ink">{sizeFormatted}</td>
       <td className="px-4 py-3 font-mono text-xs text-ink-2">{formatPrice(entryPrice)}</td>
-      <td className="px-4 py-3 font-mono text-xs text-ink-3">—</td>
+      <td className="px-4 py-3 font-mono text-xs text-ink">
+        {markPrice ? fmtP(markPrice) : '—'}
+      </td>
+      <td className="px-4 py-3 font-mono text-xs text-ink-3">{fmtP(liqPrice)}</td>
       <td className={`px-4 py-3 font-mono text-xs font-medium ${pnlNum >= 0 ? 'text-gain' : 'text-loss'}`}>
         {pnlSign}${Math.abs(pnlNum).toFixed(2)}
-        <span className="ml-1 text-ink-3">({pnlSign}{pnlPct}%)</span>
+        <div className="font-mono text-2xs opacity-70">({pnlSign}{pnlPct}%)</div>
       </td>
-      <td className="px-4 py-3 font-mono text-xs text-ink-2">{Number(leverage)}x</td>
-      <td className="px-4 py-3 font-mono text-2xs text-ink-3">
-        #{id.toString()} · {timeAgo(Number(openedAt))}
-      </td>
+      <td className="px-4 py-3 font-mono text-xs text-ink-2">{levNum}×</td>
       <td className="px-4 py-3">
         <div className="flex items-center gap-2">
           <button
-            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please revise my ${isLong ? 'long' : 'short'} ${formatMarket(market as `0x${string}`)} position #${id.toString()}`)}`)}
+            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please revise my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()}`)}`)}
             className="font-mono text-2xs px-2 py-1 rounded-sm border border-[#253357] text-ink-2 hover:text-ink transition-colors"
           >
             Revise
           </button>
           <button
-            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please close my ${isLong ? 'long' : 'short'} ${formatMarket(market as `0x${string}`)} position #${id.toString()} immediately`)}`)}
+            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please close my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()} immediately`)}`)}
             className="font-mono text-2xs px-2 py-1 rounded-sm border border-[#c94e4e40] text-loss hover:bg-[#c94e4e12] transition-colors"
           >
             Close
@@ -130,7 +163,7 @@ export function PositionTable() {
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-[#1c2540]">
-                {['Market', 'Dir', 'Size', 'Entry', 'Current', 'P&L', 'Lev', 'Info', 'Action'].map((h) => (
+                {['Market / Side', 'Size', 'Entry', 'Mark', 'Liq.', 'P&L', 'Lev', 'Action'].map((h) => (
                   <th key={h} className="px-4 py-2.5 label">{h}</th>
                 ))}
               </tr>
