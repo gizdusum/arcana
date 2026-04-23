@@ -1,14 +1,18 @@
 'use client'
 
 import { useReadContract } from 'wagmi'
+import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import { VAULT_ADDRESS, PERP_ENGINE_ABI, PERP_ENGINE_ADDRESS } from '@/lib/contracts'
 import { formatMarket, formatPrice, timeAgo } from '@/lib/utils'
+import { useOpenPositionIds } from '@/lib/useOpenPositionIds'
 
 interface PositionRowProps {
   positionId: bigint
 }
 
 function PositionRow({ positionId }: PositionRowProps) {
+  const router = useRouter()
   const { data: pos, isLoading } = useReadContract({
     address: PERP_ENGINE_ADDRESS,
     abi: PERP_ENGINE_ABI,
@@ -71,20 +75,29 @@ function PositionRow({ positionId }: PositionRowProps) {
       <td className="px-4 py-3 font-mono text-2xs text-ink-3">
         #{id.toString()} · {timeAgo(Number(openedAt))}
       </td>
+      <td className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please revise my ${isLong ? 'long' : 'short'} ${formatMarket(market as `0x${string}`)} position #${id.toString()}`)}`)}
+            className="font-mono text-2xs px-2 py-1 rounded-sm border border-[#253357] text-ink-2 hover:text-ink transition-colors"
+          >
+            Revise
+          </button>
+          <button
+            onClick={() => router.push(`/app?msg=${encodeURIComponent(`Please close my ${isLong ? 'long' : 'short'} ${formatMarket(market as `0x${string}`)} position #${id.toString()} immediately`)}`)}
+            className="font-mono text-2xs px-2 py-1 rounded-sm border border-[#c94e4e40] text-loss hover:bg-[#c94e4e12] transition-colors"
+          >
+            Close
+          </button>
+        </div>
+      </td>
     </tr>
   )
 }
 
 export function PositionTable() {
-  const { data: positionIds, isLoading } = useReadContract({
-    address: PERP_ENGINE_ADDRESS,
-    abi: PERP_ENGINE_ABI,
-    functionName: 'getVaultOpenPositions',
-    args: VAULT_ADDRESS ? [VAULT_ADDRESS] : undefined,
-    query: { enabled: !!VAULT_ADDRESS },
-  })
-
-  const ids = positionIds ?? []
+  const router = useRouter()
+  const { ids, isLoading } = useOpenPositionIds(VAULT_ADDRESS)
 
   return (
     <div className="border border-[#1c2540] bg-surface">
@@ -117,7 +130,7 @@ export function PositionTable() {
           <table className="w-full text-left">
             <thead>
               <tr className="border-b border-[#1c2540]">
-                {['Market', 'Dir', 'Size', 'Entry', 'Current', 'P&L', 'Lev', 'Info'].map((h) => (
+                {['Market', 'Dir', 'Size', 'Entry', 'Current', 'P&L', 'Lev', 'Info', 'Action'].map((h) => (
                   <th key={h} className="px-4 py-2.5 label">{h}</th>
                 ))}
               </tr>
@@ -128,6 +141,28 @@ export function PositionTable() {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {ids.length > 0 && (
+        <div className="border-t border-[#1c2540] px-4 py-3 flex items-center justify-between gap-3">
+          <span className="font-mono text-2xs text-ink-3">
+            Open positions are scanned from all engine positions to avoid stale vault mappings.
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => router.push('/trade')}
+              className="font-mono text-2xs px-3 py-1.5 rounded-sm border border-[#253357] text-ink-2 hover:text-ink hover:border-[#31446f] transition-colors"
+            >
+              Open Trade
+            </button>
+            <Link
+              href="/app?msg=Review%20my%20open%20positions%20and%20help%20me%20revise%20or%20close%20them"
+              className="font-mono text-2xs px-3 py-1.5 rounded-sm border border-[#6e5ff040] text-arc hover:bg-[#6e5ff012] transition-colors"
+            >
+              Revise via ARCANA
+            </Link>
+          </div>
         </div>
       )}
     </div>
