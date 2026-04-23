@@ -146,6 +146,7 @@ function DepositForm() {
           functionName: 'approve',
           args: [VAULT_ADDRESS, amountBigint],
           gasPrice: parseGwei('55'),
+          gas: 100_000n,
         })
         const approveReceipt = await publicClient.waitForTransactionReceipt({
           hash: approveHash,
@@ -164,6 +165,7 @@ function DepositForm() {
         functionName: 'deposit',
         args: [amountBigint, address],
         gasPrice: parseGwei('55'),
+        gas: 300_000n,
       })
       const depositReceipt = await publicClient.waitForTransactionReceipt({
         hash: depositHash,
