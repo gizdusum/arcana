@@ -37,3 +37,4 @@ agent/data/*.db-journal
 # Agent deps
 agent/node_modules/
 frontend/node_modules/
+.vercel
