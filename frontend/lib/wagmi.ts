@@ -1,4 +1,4 @@
-import { defineChain } from 'viem'
+import { defineChain, parseGwei } from 'viem'
 import { connectorsForWallets } from '@rainbow-me/rainbowkit'
 import {
   metaMaskWallet,
@@ -24,6 +24,14 @@ export const arcTestnet = defineChain({
     default: { name: 'ArcScan', url: 'https://testnet.arcscan.app' },
   },
   testnet: true,
+  // Arc Testnet uses legacy (non-EIP-1559) gas pricing.
+  // Force 55 gwei so MetaMask/wagmi don't pull near-zero from the node
+  // and avoid "txpool is full" rejections from the mempool.
+  fees: {
+    estimateFeesPerGas: async () => ({
+      gasPrice: parseGwei('55'),
+    }),
+  },
 })
 
 const PROJECT_ID = process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || ''
