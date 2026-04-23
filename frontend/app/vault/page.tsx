@@ -88,12 +88,28 @@ function HermesStatusBar() {
   )
 }
 
+// Poll an async predicate every `intervalMs` until it returns true or `timeoutMs` elapses.
+async function pollUntil(
+  check: () => Promise<boolean>,
+  timeoutMs: number,
+  intervalMs = 4_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await check()) return true
+    await new Promise((r) => setTimeout(r, intervalMs))
+  }
+  return false
+}
+
 function DepositForm() {
   const { address } = useAccount()
   const publicClient = usePublicClient()
   const [amount, setAmount] = useState('')
-  const [status, setStatus] = useState<'idle' | 'approving' | 'depositing' | 'success' | 'error'>('idle')
+  // submitted = tx is in mempool, confirmation pending
+  const [status, setStatus] = useState<'idle' | 'approving' | 'awaiting-approve' | 'depositing' | 'submitted' | 'success' | 'error'>('idle')
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [pendingHash, setPendingHash] = useState<`0x${string}` | null>(null)
 
   const amountBigint = amount ? parseUnits(amount, 6) : 0n
 
@@ -102,7 +118,7 @@ function DepositForm() {
     abi: USDC_ABI,
     functionName: 'balanceOf',
     args: address ? [address] : undefined,
-    query: { enabled: !!address },
+    query: { enabled: !!address, refetchInterval: status === 'submitted' ? 6_000 : false },
   })
 
   const { data: allowance, refetch: refetchAllowance } = useReadContract({
@@ -113,32 +129,79 @@ function DepositForm() {
     query: { enabled: !!address && !!VAULT_ADDRESS },
   })
 
+  const { data: vaultShares, refetch: refetchShares } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address, refetchInterval: status === 'submitted' ? 6_000 : false },
+  })
+
   const { writeContractAsync } = useWriteContract()
 
+  // Auto-reset success banner after 5s
   useEffect(() => {
     if (status !== 'success') return
-    const timer = setTimeout(() => setStatus('idle'), 4000)
-    return () => clearTimeout(timer)
+    const t = setTimeout(() => setStatus('idle'), 5_000)
+    return () => clearTimeout(t)
   }, [status])
 
-  const needsApproval = !allowance || allowance < amountBigint
-  const isLoading = status === 'approving' || status === 'depositing'
-  const canDeposit = !!address && amountBigint > 0n && !!VAULT_ADDRESS && !isLoading
+  // Background receipt poller: once deposit tx submitted, poll every 6s for up to 10 min
+  useEffect(() => {
+    if (status !== 'submitted' || !pendingHash || !publicClient) return
 
-  const handleDeposit = async () => {
-    if (!canDeposit) return
+    let alive = true
+    const deadline = Date.now() + 600_000
 
-    if (!publicClient) {
-      setStatus('error')
-      setErrorMessage('RPC client unavailable — please reconnect your wallet.')
-      return
+    const poll = async () => {
+      while (alive && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 6_000))
+        if (!alive) return
+        try {
+          const receipt = await publicClient.getTransactionReceipt({ hash: pendingHash! })
+          if (!receipt) continue
+          if (receipt.status === 'reverted') {
+            setStatus('error')
+            setErrorMessage('Deposit reverted on-chain.')
+            setPendingHash(null)
+            return
+          }
+          // success
+          setAmount('')
+          setStatus('success')
+          setPendingHash(null)
+          await Promise.all([refetchAllowance(), refetchUsdcBalance(), refetchShares()])
+          return
+        } catch {
+          // receipt not available yet — keep polling
+        }
+      }
+      // timed out — tx is still pending, just leave status as submitted
     }
 
-    // Reset any previous error before retrying
+    poll()
+    return () => { alive = false }
+  }, [status, pendingHash, publicClient, refetchAllowance, refetchUsdcBalance, refetchShares])
+
+  const needsApproval = !allowance || allowance < amountBigint
+  const isBusy = status === 'approving' || status === 'awaiting-approve' || status === 'depositing'
+  const canDeposit = !!address && amountBigint > 0n && !!VAULT_ADDRESS && !isBusy && status !== 'submitted'
+
+  const handleDeposit = async () => {
+    if (!canDeposit || !publicClient) return
     setErrorMessage(null)
+    setPendingHash(null)
 
     try {
-      if (needsApproval) {
+      // Re-read allowance live — a previous timed-out approve may already be on-chain
+      const liveAllowance = await publicClient.readContract({
+        address: USDC_ADDRESS,
+        abi: USDC_ABI,
+        functionName: 'allowance',
+        args: [address!, VAULT_ADDRESS],
+      })
+
+      if (liveAllowance < amountBigint) {
         setStatus('approving')
         const approveHash = await writeContractAsync({
           address: USDC_ADDRESS,
@@ -148,38 +211,42 @@ function DepositForm() {
           gasPrice: parseGwei('55'),
           gas: 100_000n,
         })
-        const approveReceipt = await publicClient.waitForTransactionReceipt({
-          hash: approveHash,
-          timeout: 90_000, // 90s — Arc Testnet can be slow
-        })
-        if (approveReceipt.status === 'reverted') {
-          throw new Error('Approve transaction was reverted on-chain.')
+        setPendingHash(approveHash)
+        setStatus('awaiting-approve')
+
+        // Poll allowance (don't use waitForTransactionReceipt — too slow on Arc Testnet)
+        const approved = await pollUntil(async () => {
+          const al = await publicClient.readContract({
+            address: USDC_ADDRESS,
+            abi: USDC_ABI,
+            functionName: 'allowance',
+            args: [address!, VAULT_ADDRESS],
+          })
+          return al >= amountBigint
+        }, 300_000) // 5 min
+
+        if (!approved) {
+          throw new Error(
+            `Approval pending on-chain. Check ArcScan and try again once confirmed.`
+          )
         }
         await refetchAllowance()
       }
 
+      setPendingHash(null)
       setStatus('depositing')
       const depositHash = await writeContractAsync({
         address: VAULT_ADDRESS,
         abi: VAULT_ABI,
         functionName: 'deposit',
-        args: [amountBigint, address],
+        args: [amountBigint, address!],
         gasPrice: parseGwei('55'),
         gas: 300_000n,
       })
-      const depositReceipt = await publicClient.waitForTransactionReceipt({
-        hash: depositHash,
-        timeout: 90_000,
-      })
-      if (depositReceipt.status === 'reverted') {
-        throw new Error(
-          'Deposit reverted on-chain. The vault may be private or have insufficient liquidity.'
-        )
-      }
 
-      setAmount('')
-      setStatus('success')
-      await Promise.all([refetchAllowance(), refetchUsdcBalance()])
+      // Don't block — show submitted state immediately so user isn't stuck
+      setPendingHash(depositHash)
+      setStatus('submitted')
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error)
       const isRejected =
@@ -190,11 +257,12 @@ function DepositForm() {
       setStatus('error')
       setErrorMessage(
         isRejected
-          ? 'Transaction cancelled by user.'
-          : raw.length > 120
-          ? raw.slice(0, 120) + '…'
+          ? 'Transaction cancelled.'
+          : raw.length > 160
+          ? raw.slice(0, 160) + '…'
           : raw
       )
+      setPendingHash(null)
     }
   }
 
@@ -245,31 +313,67 @@ function DepositForm() {
         {!address
           ? 'Connect Wallet'
           : status === 'approving'
-          ? 'Approving...'
+          ? 'Waiting for wallet...'
+          : status === 'awaiting-approve'
+          ? 'Confirming approval...'
           : status === 'depositing'
-          ? 'Depositing...'
+          ? 'Waiting for wallet...'
+          : status === 'submitted'
+          ? 'Confirming deposit...'
           : status === 'success'
-          ? 'Deposited'
+          ? 'Deposited ✓'
           : needsApproval
           ? 'Approve & Deposit'
           : 'Deposit'}
       </button>
 
       {status === 'approving' && (
-        <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 1/2 — approve USDC spend</p>
+        <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 1/2 — confirm approval in wallet</p>
+      )}
+      {status === 'awaiting-approve' && pendingHash && (
+        <div className="mt-2 text-center space-y-1">
+          <p className="font-mono text-2xs text-ink-3">Approval pending on Arc Testnet…</p>
+          <a
+            href={`https://testnet.arcscan.app/tx/${pendingHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="font-mono text-2xs text-arc hover:underline"
+          >
+            View on ArcScan ↗
+          </a>
+        </div>
       )}
       {status === 'depositing' && (
-        <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 2/2 — depositing into vault</p>
+        <p className="mt-2 font-mono text-2xs text-ink-3 text-center">Step 2/2 — confirm deposit in wallet</p>
+      )}
+      {status === 'submitted' && pendingHash && (
+        <div className="mt-3 border border-[#1c2540] bg-bg rounded-sm p-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 rounded-full hermes-alive bg-arc shrink-0" />
+            <p className="font-mono text-2xs text-ink">Transaction submitted — waiting for block confirmation</p>
+          </div>
+          <p className="font-mono text-2xs text-ink-3 leading-relaxed">
+            Arc Testnet can take a few minutes to mine. You can safely close this page — your deposit is in the queue.
+          </p>
+          <a
+            href={`https://testnet.arcscan.app/tx/${pendingHash}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center gap-1 font-mono text-2xs text-arc hover:underline"
+          >
+            Track on ArcScan ↗
+          </a>
+        </div>
       )}
       {status === 'success' && (
-        <p className="mt-2 font-mono text-2xs text-gain text-center">Deposit confirmed</p>
+        <p className="mt-2 font-mono text-2xs text-gain text-center">Deposit confirmed on-chain ✓</p>
       )}
       {status === 'error' && errorMessage && (
-        <div className="mt-2 text-center">
-          <p className="font-mono text-2xs text-loss">{errorMessage}</p>
+        <div className="mt-2 text-center space-y-1">
+          <p className="font-mono text-2xs text-loss leading-relaxed">{errorMessage}</p>
           <button
-            onClick={() => { setStatus('idle'); setErrorMessage(null) }}
-            className="mt-1 font-mono text-2xs underline"
+            onClick={() => { setStatus('idle'); setErrorMessage(null); setPendingHash(null) }}
+            className="font-mono text-2xs underline"
             style={{ color: 'var(--ink-3)' }}
           >
             Try again
