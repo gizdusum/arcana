@@ -63,37 +63,36 @@ async function fetchPrice(asset: string): Promise<number | null> {
 }
 
 export async function POST(req: NextRequest) {
-  const { asset, isLong, collateralUsdc, leverage } = await req.json() as {
-    asset: string
-    isLong: boolean
-    collateralUsdc: number
-    leverage: number
-  }
+  try {
+    const { asset, isLong, collateralUsdc, leverage } = await req.json() as {
+      asset: string
+      isLong: boolean
+      collateralUsdc: number
+      leverage: number
+    }
 
-  const privateKey = process.env.HERMES_PRIVATE_KEY
-  const vaultAddress = process.env.HERMES_VAULT_ADDRESS || '0x5e1ac795fEF51F6F261890Bb4d0119aD1f097D21'
-  const oracleAddress = process.env.HERMES_ORACLE_ADDRESS || '0x577dE275F2Bbe090E104422e931e5e74B680AB81'
+    const privateKey = process.env.HERMES_PRIVATE_KEY
+    const vaultAddress = process.env.HERMES_VAULT_ADDRESS || '0x5e1ac795fEF51F6F261890Bb4d0119aD1f097D21'
+    const oracleAddress = process.env.HERMES_ORACLE_ADDRESS || '0x577dE275F2Bbe090E104422e931e5e74B680AB81'
 
-  if (!privateKey) {
-    return NextResponse.json({ error: 'HERMES_PRIVATE_KEY not configured' }, { status: 500 })
-  }
-  if (!asset || collateralUsdc <= 0 || leverage < 1 || leverage > 10) {
-    return NextResponse.json({ error: 'Invalid parameters' }, { status: 400 })
-  }
+    if (!privateKey) {
+      return NextResponse.json({ error: 'HERMES_PRIVATE_KEY not configured' }, { status: 500 })
+    }
+    if (!asset || collateralUsdc <= 0 || leverage < 1 || leverage > 10) {
+      return NextResponse.json({ error: 'Invalid parameters' }, { status: 400 })
+    }
 
-  const account = privateKeyToAccount(privateKey as `0x${string}`)
-  const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) })
+    const account = privateKeyToAccount(privateKey as `0x${string}`)
+    const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) })
 
-  const marketStr = asset === 'BTC' ? 'BTC/USD' : 'ETH/USD'
-  const marketKey = keccak256(stringToBytes(marketStr))
-  const collateral = parseUnits(String(collateralUsdc), 6)
+    const marketStr = asset === 'BTC' ? 'BTC/USD' : 'ETH/USD'
+    const marketKey = keccak256(stringToBytes(marketStr))
+    const collateral = parseUnits(String(collateralUsdc), 6)
 
-  // 1. Update oracle with live price before opening
-  const livePrice = await fetchPrice(asset)
-  if (livePrice !== null) {
-    try {
+    // 1. Fire-and-forget oracle price update
+    fetchPrice(asset).then((livePrice) => {
+      if (livePrice === null) return
       const priceIn8Dec = BigInt(Math.round(livePrice * 1e8))
-      // Fire-and-forget: don't wait for oracle update to confirm
       walletClient.writeContract({
         address: oracleAddress as `0x${string}`,
         abi: ORACLE_ABI,
@@ -102,16 +101,10 @@ export async function POST(req: NextRequest) {
         gasPrice: parseGwei('55'),
         gas: 100_000n,
       }).catch(() => {})
-    } catch {
-      // Non-fatal: continue with existing oracle price
-    }
-  }
+    }).catch(() => {})
 
-  // 2. Open position via vault.executeOpen — fire and return immediately
-  // (Arc Testnet can take 30–120s to confirm; Vercel functions time out faster)
-  let hash: `0x${string}`
-  try {
-    hash = await walletClient.writeContract({
+    // 2. Submit executeOpen — returns tx hash immediately, doesn't wait for confirmation
+    const hash = await walletClient.writeContract({
       address: vaultAddress as `0x${string}`,
       abi: VAULT_ABI,
       functionName: 'executeOpen',
@@ -119,11 +112,10 @@ export async function POST(req: NextRequest) {
       gasPrice: parseGwei('55'),
       gas: 2_000_000n,
     })
+
+    return NextResponse.json({ success: true, hash, pending: true })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return NextResponse.json({ error: msg }, { status: 500 })
   }
-
-  // Return hash immediately — the UI polls getVaultOpenPositions every 3s
-  return NextResponse.json({ success: true, hash, pending: true })
 }
