@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   createWalletClient,
-  createPublicClient,
   http,
   parseGwei,
   defineChain,
@@ -55,21 +54,6 @@ async function fetchPrice(asset: string): Promise<number | null> {
   }
 }
 
-async function pollReceipt(
-  publicClient: ReturnType<typeof createPublicClient>,
-  hash: `0x${string}`,
-  timeoutMs = 120_000
-): Promise<{ status: 'success' | 'reverted'; blockNumber: bigint }> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const receipt = await publicClient.getTransactionReceipt({ hash }).catch(() => null)
-    if (receipt && receipt.blockNumber != null) {
-      return { status: receipt.status, blockNumber: receipt.blockNumber }
-    }
-    await new Promise((r) => setTimeout(r, 4_000))
-  }
-  throw new Error('Timed out waiting for transaction receipt')
-}
 
 export async function POST(req: NextRequest) {
   const { positionId, asset } = await req.json() as {
@@ -90,7 +74,6 @@ export async function POST(req: NextRequest) {
 
   const account = privateKeyToAccount(privateKey as `0x${string}`)
   const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) })
-  const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC) })
 
   // Update oracle price with live price for accurate settlement
   if (asset) {
@@ -101,15 +84,14 @@ export async function POST(req: NextRequest) {
         const marketStr = asset === 'BTC' ? 'BTC/USD' : 'ETH/USD'
         const marketKey = keccak256(stringToBytes(marketStr))
         const priceIn8Dec = BigInt(Math.round(livePrice * 1e8))
-        const oracleHash = await walletClient.writeContract({
+        walletClient.writeContract({
           address: oracleAddress as `0x${string}`,
           abi: ORACLE_ABI,
           functionName: 'updateMockPrice',
           args: [marketKey, priceIn8Dec as unknown as bigint],
           gasPrice: parseGwei('55'),
           gas: 100_000n,
-        })
-        await pollReceipt(publicClient, oracleHash, 60_000)
+        }).catch(() => {})
       } catch {
         // Non-fatal
       }
@@ -131,13 +113,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: msg }, { status: 500 })
   }
 
-  try {
-    const receipt = await pollReceipt(publicClient, hash)
-    if (receipt.status === 'reverted') {
-      return NextResponse.json({ error: 'Transaction reverted', hash }, { status: 500 })
-    }
-    return NextResponse.json({ success: true, hash })
-  } catch {
-    return NextResponse.json({ success: true, hash, pending: true })
-  }
+  // Return hash immediately — the UI polls getVaultOpenPositions every 3s
+  return NextResponse.json({ success: true, hash, pending: true })
 }
