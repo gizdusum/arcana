@@ -758,10 +758,11 @@ export function ArcanaTerminal() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ asset, isLong, collateralUsdc, leverage }),
         })
-        const data = await res.json()
+        let data: { error?: string; hash?: string; pending?: boolean } = {}
+        try { data = await res.json() } catch { /* empty body */ }
 
         if (!res.ok || data.error) {
-          addMsg({ role: 'system', content: `Position failed: ${data.error ?? 'unknown error'}` })
+          addMsg({ role: 'system', content: `Position failed: ${data.error ?? `HTTP ${res.status}`}` })
         } else {
           addMsg({
             role: 'system',
