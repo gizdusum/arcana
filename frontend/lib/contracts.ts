@@ -1,17 +1,17 @@
 // Deployed on Arc Testnet (Chain ID 5042002)
 export const VAULT_ADDRESS = (
   process.env.NEXT_PUBLIC_VAULT_ADDRESS ||
-  '0xF834eE46821635DE5e72d129905240313a9127AB'
+  '0x5e1ac795fEF51F6F261890Bb4d0119aD1f097D21'
 ) as `0x${string}`
 
 export const PERP_ENGINE_ADDRESS = (
   process.env.NEXT_PUBLIC_PERP_ENGINE_ADDRESS ||
-  '0xAD631fefb2D20Ed5982b2Ee5087ff0dbF6674e01'
+  '0xfdebeD9FAE7Cbd73E4E45EEA18DE4e4fad45A2e9'
 ) as `0x${string}`
 
 export const ORACLE_ADDRESS = (
   process.env.NEXT_PUBLIC_ORACLE_ADDRESS ||
-  '0x2ebEf87AAF7Cb0Be2D90F873d35C90cc3DfcB7af'
+  '0x577dE275F2Bbe090E104422e931e5e74B680AB81'
 ) as `0x${string}`
 
 export const USDC_ADDRESS = '0x3600000000000000000000000000000000000000' as `0x${string}`
@@ -180,6 +180,26 @@ export const VAULT_ABI = [
     inputs: [],
     outputs: [{ name: '', type: 'address', internalType: 'contract ArcanaPerpEngine' }],
     stateMutability: 'view',
+  },
+  // HERMES trade execution
+  {
+    type: 'function',
+    name: 'executeOpen',
+    inputs: [
+      { name: 'market', type: 'bytes32', internalType: 'bytes32' },
+      { name: 'isLong', type: 'bool', internalType: 'bool' },
+      { name: 'collateralAmount', type: 'uint256', internalType: 'uint256' },
+      { name: 'leverage', type: 'uint8', internalType: 'uint8' },
+    ],
+    outputs: [{ name: 'positionId', type: 'uint256', internalType: 'uint256' }],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
+    name: 'executeClose',
+    inputs: [{ name: 'positionId', type: 'uint256', internalType: 'uint256' }],
+    outputs: [{ name: 'pnl', type: 'int256', internalType: 'int256' }],
+    stateMutability: 'nonpayable',
   },
   // Events
   {

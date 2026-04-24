@@ -446,7 +446,7 @@ function TradeConfirmModal({
               onMouseEnter={(e) => { if (!isExecuting) (e.currentTarget as HTMLElement).style.background = `${accent}28` }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = `${accent}18` }}
             >
-              {isExecuting ? '· Signing ·' : `Execute ${dirLabel}`}
+              {isExecuting ? '· Executing ·' : `Execute ${dirLabel}`}
             </button>
             <button
               onClick={onCancel}
@@ -746,20 +746,29 @@ export function ArcanaTerminal() {
         addMsg({ role: 'system', content: `Strategy → ${proposal.strategy} (${h.slice(0, 10)}...)` })
         setTimeout(() => router.push('/trade'), 1500)
       } else if (proposal.action === 'open_position') {
-        const stratMap: Record<string, Strategy> = { long: 'APOLLO', short: 'ATLAS' }
-        const newStrat = stratMap[proposal.direction ?? 'long'] as Strategy
-        if (selectedStrategy !== newStrat) {
-          const idx: Record<Strategy, number> = { APOLLO: 0, ATLAS: 1, ARES: 2 }
-          await wc.sendTransaction({
-            to: VAULT_ADDRESS,
-            data: encodeFunctionData({ abi: VAULT_ABI, functionName: 'setStrategy', args: [idx[newStrat]] }),
-            gasPrice: parseGwei('55'),
-            gas: 100_000n,
+        const asset = proposal.asset ?? 'ETH'
+        const isLong = proposal.direction !== 'short'
+        const collateralUsdc = proposal.size_usdc ?? 50
+        const leverage = proposal.leverage ?? 3
+
+        addMsg({ role: 'system', content: `ARCANA executing ${isLong ? 'LONG' : 'SHORT'} ${asset} · $${collateralUsdc} · ${leverage}×...` })
+
+        const res = await fetch('/api/hermes/execute', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ asset, isLong, collateralUsdc, leverage }),
+        })
+        const data = await res.json()
+
+        if (!res.ok || data.error) {
+          addMsg({ role: 'system', content: `Position failed: ${data.error ?? 'unknown error'}` })
+        } else {
+          addMsg({
+            role: 'system',
+            content: `Position opened${data.hash ? ` (${data.hash.slice(0, 10)}...)` : ''}${data.pending ? ' — confirming...' : ''}`,
           })
-          setSelectedStrategy(newStrat)
+          setTimeout(() => router.push('/trade'), 2000)
         }
-        addMsg({ role: 'system', content: `${proposal.direction?.toUpperCase()} ${proposal.asset} queued → Trade` })
-        setTimeout(() => router.push('/trade'), 1500)
       } else if (proposal.action === 'close_position') {
         addMsg({ role: 'system', content: `Close signal queued for ${proposal.asset} → Trade` })
         setTimeout(() => router.push('/trade'), 1500)

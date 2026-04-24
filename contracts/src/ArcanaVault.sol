@@ -107,8 +107,8 @@ contract ArcanaVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 vaultBalance = IERC20(asset()).balanceOf(address(this));
         require(vaultBalance >= collateralAmount, "Insufficient vault balance");
 
-        // Approve the exact amount to PerpEngine
-        IERC20(asset()).forceApprove(address(perpEngine), collateralAmount);
+        // Push collateral directly to PerpEngine (avoids contract-to-contract approve issues)
+        IERC20(asset()).safeTransfer(address(perpEngine), collateralAmount);
 
         positionId = perpEngine.openPosition(
             address(this),
@@ -139,11 +139,6 @@ contract ArcanaVault is ERC4626, Ownable, ReentrancyGuard {
     /// @notice Log HERMES reasoning on-chain for transparency.
     function logDecision(string calldata reasoning) external onlyHermes {
         emit HermesDecisionLogged(reasoning, block.timestamp);
-    }
-
-    /// @notice Approve USDC spending to perp engine (for manual approval top-up if needed).
-    function approveEngine(uint256 amount) external onlyHermes {
-        IERC20(asset()).forceApprove(address(perpEngine), amount);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
