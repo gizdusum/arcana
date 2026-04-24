@@ -136,8 +136,8 @@ contract ArcanaPerpEngine is Ownable, ReentrancyGuard {
         require(collateral > 0, "Zero collateral");
         require(leverage >= 1 && leverage <= 10, "Bad leverage");
 
-        // Pull collateral from vault
-        usdc.safeTransferFrom(vault, address(this), collateral);
+        // Collateral is pushed by the vault via safeTransfer before this call.
+        // No transferFrom needed — avoids contract-to-contract approve issues on Arc Testnet.
 
         // Calculate notional size: collateral * leverage
         uint256 size = collateral * leverage;

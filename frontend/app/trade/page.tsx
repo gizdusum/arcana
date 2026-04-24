@@ -453,7 +453,7 @@ function CloseConfirmModal({
             Close {isLong ? 'LONG' : 'SHORT'} {marketStr}?
           </p>
           <p className="font-mono text-xs mb-5 leading-relaxed" style={{ color: 'var(--ink-3)' }}>
-            This will send a close request to the ARCANA agent. Hermes will execute the close at the next available price.
+            ARCANA will execute the close on-chain at the current oracle price. No wallet signature needed.
           </p>
           <div className="flex gap-3">
             <button
@@ -904,13 +904,35 @@ export default function TradePage() {
     router.push(`/app?msg=${encodeURIComponent(msg)}`)
   }, [router])
 
-  const handleConfirmClose = useCallback(() => {
+  const [closingId, setClosingId] = useState<bigint | null>(null)
+  const [closeStatus, setCloseStatus] = useState<string | null>(null)
+
+  const handleConfirmClose = useCallback(async () => {
     if (!closeConfirm) return
-    const { id, marketStr, isLong } = closeConfirm
+    const { id, marketStr } = closeConfirm
     setCloseConfirm(null)
-    const msg = `Please close my ${isLong ? 'long' : 'short'} ${marketStr} position #${id.toString()} immediately`
-    router.push(`/app?msg=${encodeURIComponent(msg)}`)
-  }, [closeConfirm, router])
+    setClosingId(id)
+    setCloseStatus('Closing position...')
+    try {
+      const asset = marketStr.includes('BTC') ? 'BTC' : 'ETH'
+      const res = await fetch('/api/hermes/close', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ positionId: id.toString(), asset }),
+      })
+      const data = await res.json()
+      if (!res.ok || data.error) {
+        setCloseStatus(`Failed: ${data.error ?? 'unknown error'}`)
+      } else {
+        setCloseStatus('Position closed')
+        setTimeout(() => { setClosingId(null); setCloseStatus(null); refetchPositions() }, 3000)
+      }
+    } catch (err) {
+      setCloseStatus(`Error: ${err instanceof Error ? err.message.slice(0, 60) : 'unknown'}`)
+    } finally {
+      setTimeout(() => { if (closingId) { setClosingId(null); setCloseStatus(null) } }, 8000)
+    }
+  }, [closeConfirm, closingId, refetchPositions])
 
   if (!isConnected) {
     return (
@@ -941,6 +963,19 @@ export default function TradePage() {
           onConfirm={handleConfirmClose}
           onCancel={() => setCloseConfirm(null)}
         />
+      )}
+      {closeStatus && (
+        <div
+          className="fixed bottom-6 right-6 z-50 font-mono text-xs px-4 py-3 rounded-sm border"
+          style={{
+            background: 'var(--surface)',
+            borderColor: closeStatus.startsWith('Failed') || closeStatus.startsWith('Error') ? 'rgba(201,78,78,0.4)' : 'rgba(110,95,240,0.3)',
+            color: closeStatus.startsWith('Failed') || closeStatus.startsWith('Error') ? 'var(--loss)' : 'var(--arc)',
+            boxShadow: '0 8px 32px rgba(0,0,0,0.4)',
+          }}
+        >
+          {closeStatus}
+        </div>
       )}
 
       <div
