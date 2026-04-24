@@ -499,10 +499,11 @@ function PositionsPanel({
   onRequestClose: (id: bigint, marketStr: string, isLong: boolean) => void
   onRequestAdjust: (id: bigint, marketStr: string, isLong: boolean) => void
 }) {
+  const height = positionIds.length > 0 ? '300px' : '220px'
   return (
     <div
       className="border-t flex flex-col"
-      style={{ borderColor: 'var(--border)', background: 'var(--surface)', minHeight: '200px', maxHeight: '280px' }}
+      style={{ borderColor: 'var(--border)', background: 'var(--surface)', height, flexShrink: 0 }}
     >
       <div
         className="flex items-center gap-0 border-b shrink-0"
@@ -547,18 +548,35 @@ function PositionsPanel({
       <div className="flex-1 overflow-auto">
         {tab === 'positions' && (
           positionIds.length === 0 ? (
-            <div className="flex flex-col items-center justify-center h-full gap-2 py-8">
-              <span className="font-mono text-xs" style={{ color: 'var(--ink-2)' }}>No open positions</span>
-              <span className="font-mono text-2xs text-center max-w-xs leading-relaxed" style={{ color: 'var(--ink-3)' }}>
-                Positions are opened by the ARCANA agent based on your strategy. Use the order panel or the ARCANA terminal to request a trade.
-              </span>
-              <Link
-                href="/app"
-                className="mt-2 font-mono text-2xs px-4 py-1.5 rounded-sm border transition-all"
-                style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.25)' }}
+            <div className="flex flex-col items-center justify-center h-full gap-3 py-6">
+              <div
+                className="h-10 w-10 rounded-full flex items-center justify-center"
+                style={{ background: 'rgba(110,95,240,0.06)', border: '1px solid rgba(110,95,240,0.15)' }}
               >
-                Open ARCANA →
-              </Link>
+                <span className="font-mono text-lg" style={{ color: 'var(--arc)', opacity: 0.4 }}>◉</span>
+              </div>
+              <div className="text-center">
+                <span className="font-mono text-xs block mb-1" style={{ color: 'var(--ink)' }}>No open positions</span>
+                <span className="font-mono text-2xs leading-relaxed" style={{ color: 'var(--ink-3)' }}>
+                  Use the ARCANA terminal to open a position — it executes on-chain instantly.
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Link
+                  href="/app"
+                  className="font-mono text-2xs px-4 py-1.5 rounded-sm border transition-all"
+                  style={{ color: 'var(--arc)', borderColor: 'rgba(110,95,240,0.25)', background: 'rgba(110,95,240,0.04)' }}
+                >
+                  Open via ARCANA →
+                </Link>
+                <button
+                  onClick={onRefresh}
+                  className="font-mono text-2xs px-3 py-1.5 rounded-sm border transition-all"
+                  style={{ color: 'var(--ink-3)', borderColor: 'var(--border)' }}
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
           ) : (
             <table className="w-full font-mono text-xs">
@@ -980,7 +998,7 @@ export default function TradePage() {
 
       <div
         className="flex flex-col"
-        style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--bg)' }}
+        style={{ height: 'calc(100vh - 56px)', overflow: 'hidden', background: 'var(--bg)', minHeight: 0 }}
       >
         {/* Market header */}
         <MarketHeader asset={asset} onSelect={setAsset} />
