@@ -132,7 +132,32 @@ export function Nav() {
             <>
               {isConnected && chainId !== arcTestnet.id && (
                 <button
-                  onClick={() => switchChainAsync({ chainId: arcTestnet.id }).catch(() => {})}
+                  onClick={async () => {
+                    try {
+                      await switchChainAsync({ chainId: arcTestnet.id })
+                      return
+                    } catch (err: unknown) {
+                      console.warn('[Nav] switchChainAsync failed, trying manual add:', err)
+                    }
+                    try {
+                      const eth = (window as any).ethereum
+                      if (!eth) { console.error('[Nav] No window.ethereum'); return }
+                      await eth.request({
+                        method: 'wallet_addEthereumChain',
+                        params: [{
+                          chainId: `0x${arcTestnet.id.toString(16)}`,
+                          chainName: arcTestnet.name,
+                          nativeCurrency: arcTestnet.nativeCurrency,
+                          rpcUrls: [...arcTestnet.rpcUrls.default.http],
+                          blockExplorerUrls: arcTestnet.blockExplorers
+                            ? [arcTestnet.blockExplorers.default.url]
+                            : undefined,
+                        }],
+                      })
+                    } catch (err: unknown) {
+                      console.error('[Nav] wallet_addEthereumChain failed:', err)
+                    }
+                  }}
                   className="font-mono text-xs px-3 py-1.5 rounded-sm border transition-all"
                   style={{
                     color: '#f59e0b',
