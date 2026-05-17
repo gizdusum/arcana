@@ -53,15 +53,23 @@ const ORACLE_ABI = [
 const RPC = 'https://rpc.testnet.arc.network'
 
 async function fetchPrice(asset: string): Promise<number | null> {
+  // CoinGecko (primary — works from cloud IPs unlike Binance)
   try {
-    const sym = asset === 'BTC' ? 'BTCUSDT' : 'ETHUSDT'
-    const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`, { cache: 'no-store' })
+    const id = asset === 'BTC' ? 'bitcoin' : 'ethereum'
+    const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=usd`, { cache: 'no-store' })
     const d = await r.json()
-    const v = parseFloat(d.price)
-    return Number.isFinite(v) ? v : null
-  } catch {
-    return null
-  }
+    const v = d[id]?.usd
+    if (Number.isFinite(v)) return v
+  } catch {}
+  // Coinbase fallback
+  try {
+    const pair = asset === 'BTC' ? 'BTC-USD' : 'ETH-USD'
+    const r = await fetch(`https://api.coinbase.com/v2/prices/${pair}/spot`, { cache: 'no-store' })
+    const d = await r.json()
+    const v = parseFloat(d.data?.amount)
+    if (Number.isFinite(v)) return v
+  } catch {}
+  return null
 }
 
 export async function POST(req: NextRequest) {
