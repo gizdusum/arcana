@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useRouter } from 'next/navigation'
-import { useAccount, useWalletClient } from 'wagmi'
+import { useAccount, useWalletClient, useReadContract } from 'wagmi'
 import { parseUnits, encodeFunctionData } from 'viem'
 import { VAULT_ADDRESS, USDC_ADDRESS, VAULT_ABI, USDC_ABI } from '@/lib/contracts'
 
@@ -19,6 +19,12 @@ type Proposal = {
   reasoning: string
 }
 
+type MessageAction = {
+  label: string
+  href?: string
+  push?: string
+}
+
 type Message = {
   id: string
   role: 'user' | 'assistant' | 'system'
@@ -26,6 +32,7 @@ type Message = {
   toolCalls?: string[]
   proposal?: Proposal
   pending?: boolean
+  action?: MessageAction
 }
 
 const STRATEGIES: { id: Strategy; label: string; desc: string; accent: string }[] = [
@@ -123,6 +130,32 @@ export function HermesAdvisor() {
   const { address, isConnected } = useAccount()
   const { data: walletClient } = useWalletClient()
 
+  // ── Balance reads for pre-trade gate ────────────────────────────────────────
+  const { data: userShares } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  })
+  const { data: userValueRaw } = useReadContract({
+    address: VAULT_ADDRESS,
+    abi: VAULT_ABI,
+    functionName: 'convertToAssets',
+    args: userShares && userShares > 0n ? [userShares] : undefined,
+    query: { enabled: !!userShares && userShares > 0n },
+  })
+  const { data: walletUsdcRaw } = useReadContract({
+    address: USDC_ADDRESS,
+    abi: USDC_ABI,
+    functionName: 'balanceOf',
+    args: address ? [address] : undefined,
+    query: { enabled: !!address },
+  })
+
+  const vaultUsd = userShares === 0n ? 0 : (userValueRaw ? Number(userValueRaw) / 1e6 : 0)
+  const walletUsdc = walletUsdcRaw ? Number(walletUsdcRaw) / 1e6 : 0
+
   const [selectedStrategy, setSelectedStrategy] = useState<Strategy | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -189,6 +222,32 @@ export function HermesAdvisor() {
         setSelectedStrategy(proposal.strategy)
         setTimeout(() => router.push('/trade'), 1500)
       } else if (proposal.action === 'open_position' && proposal.asset && proposal.direction) {
+        // ── Balance gate ────────────────────────────────────────────────────
+        const sizeNeeded = proposal.size_usdc ?? 0
+        if (sizeNeeded <= 0) {
+          addMsg({
+            role: 'system',
+            content: 'The agent proposed a trade with no valid size. Please rephrase your request — try specifying the amount, e.g. "open $10 ETH long".',
+          })
+          return
+        }
+        if (vaultUsd === 0 && walletUsdc === 0) {
+          addMsg({
+            role: 'system',
+            content: 'You need test USDC to trade. Get some from the Circle faucet.',
+            action: { label: 'Open Faucet', href: 'https://faucet.circle.com' },
+          })
+          return
+        }
+        if (vaultUsd < sizeNeeded) {
+          addMsg({
+            role: 'system',
+            content: `Your vault balance is $${vaultUsd.toFixed(2)}, but this trade needs $${sizeNeeded.toFixed(2)} collateral. Deposit more USDC first.`,
+            action: { label: 'Go to Vault', push: '/vault' },
+          })
+          return
+        }
+        // ── Scenario C: sufficient balance, proceed ──────────────────────────
         const strategyForDirection = proposal.direction === 'long' ? 'APOLLO' : 'ATLAS'
         const currentStrategy = selectedStrategy
         if (currentStrategy !== strategyForDirection) {
@@ -430,7 +489,23 @@ export function HermesAdvisor() {
                     {msg.role === 'system' && (
                       <div className="flex gap-2 font-mono text-xs text-ink-3">
                         <span style={{ color: 'rgba(110,95,240,0.3)' }} className="shrink-0">—</span>
-                        <span>{msg.content}</span>
+                        <div>
+                          <span>{msg.content}</span>
+                          {msg.action && (
+                            <div className="mt-2">
+                              <button
+                                onClick={() => {
+                                  if (msg.action!.href) window.open(msg.action!.href, '_blank', 'noopener')
+                                  if (msg.action!.push) router.push(msg.action!.push)
+                                }}
+                                className="font-mono text-2xs px-3 py-1 rounded-sm border transition-all"
+                                style={{ color: '#6e5ff0', borderColor: 'rgba(110,95,240,0.3)', background: 'rgba(110,95,240,0.07)' }}
+                              >
+                                {msg.action.label}
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
                     )}
                     {msg.role === 'user' && (
