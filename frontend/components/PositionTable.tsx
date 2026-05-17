@@ -12,8 +12,17 @@ function useLivePrice(marketStr: string) {
   const [price, setPrice] = useState<number | null>(null)
   useEffect(() => {
     if (!marketStr) return
-    const sym = marketStr.includes('BTC') ? 'btcusdt' : 'ethusdt'
-    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${sym}@miniTicker`)
+    const isBtc = marketStr.includes('BTC')
+    const restSym = isBtc ? 'BTCUSDT' : 'ETHUSDT'
+    const wsSym  = isBtc ? 'btcusdt'  : 'ethusdt'
+
+    // REST cold-start: populate before WebSocket sends its first tick
+    fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${restSym}`, { cache: 'no-store' })
+      .then(r => r.json())
+      .then(d => { if (d?.price) setPrice(prev => prev === null ? Number(d.price) : prev) })
+      .catch(() => {})
+
+    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${wsSym}@miniTicker`)
     ws.onmessage = (e) => {
       try { setPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
     }
