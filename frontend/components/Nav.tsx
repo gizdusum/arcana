@@ -154,6 +154,22 @@ export function Nav() {
                             : undefined,
                         }],
                       })
+                      // Import USDC token so user sees their trading balance in MetaMask
+                      try {
+                        await eth.request({
+                          method: 'wallet_watchAsset',
+                          params: {
+                            type: 'ERC20',
+                            options: {
+                              address: '0x3600000000000000000000000000000000000000',
+                              symbol: 'USDC',
+                              decimals: 6,
+                            },
+                          } as any,
+                        })
+                      } catch (err: unknown) {
+                        console.warn('[Nav] wallet_watchAsset USDC failed (non-critical):', err)
+                      }
                     } catch (err: unknown) {
                       console.error('[Nav] wallet_addEthereumChain failed:', err)
                     }
