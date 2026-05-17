@@ -15,6 +15,11 @@ build/
 .env.development.local
 .env.test.local
 .env.production.local
+.env.production
+backend/.env
+*.key
+*.pem
+vps_key
 
 # Debug
 npm-debug.log*
