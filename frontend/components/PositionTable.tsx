@@ -152,10 +152,15 @@ export function PositionTable() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[#1c2540]">
         <div className="flex items-center gap-2">
-          <span className="label">Open Positions</span>
-          {ids.length > 0 && (
-            <span className="font-mono text-2xs text-arc">({ids.length})</span>
-          )}
+          <div>
+            <div className="flex items-center gap-2">
+              <span className="label">Vault Positions</span>
+              {ids.length > 0 && (
+                <span className="font-mono text-2xs text-arc">({ids.length})</span>
+              )}
+            </div>
+            <span className="font-mono text-2xs text-ink-3 opacity-60">Shared across all depositors</span>
+          </div>
         </div>
         <span className="font-mono text-2xs text-ink-3">ARCANA managed</span>
       </div>
