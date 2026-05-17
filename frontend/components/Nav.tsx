@@ -1,6 +1,5 @@
 'use client'
 
-import { useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useTheme } from 'next-themes'
@@ -31,12 +30,6 @@ export function Nav() {
   const { lang, setLang } = useLang()
   const { isConnected, chainId } = useAccount()
   const { switchChainAsync } = useSwitchChain()
-
-  useEffect(() => {
-    if (isConnected && chainId !== arcTestnet.id) {
-      switchChainAsync({ chainId: arcTestnet.id }).catch(() => {})
-    }
-  }, [isConnected, chainId, switchChainAsync])
 
   const isLanding = path === '/'
   const links = isLanding ? LANDING_LINKS : APP_LINKS
@@ -136,12 +129,27 @@ export function Nav() {
 
           {/* Wallet connect (only in app) */}
           {!isLanding && (
-            <ConnectButton
-              label="Connect"
-              accountStatus="address"
-              chainStatus="none"
-              showBalance={false}
-            />
+            <>
+              {isConnected && chainId !== arcTestnet.id && (
+                <button
+                  onClick={() => switchChainAsync({ chainId: arcTestnet.id }).catch(() => {})}
+                  className="font-mono text-xs px-3 py-1.5 rounded-sm border transition-all"
+                  style={{
+                    color: '#f59e0b',
+                    borderColor: 'rgba(245,158,11,0.35)',
+                    background: 'rgba(245,158,11,0.08)',
+                  }}
+                >
+                  Switch to Arc Testnet
+                </button>
+              )}
+              <ConnectButton
+                label="Connect"
+                accountStatus="address"
+                chainStatus="none"
+                showBalance={false}
+              />
+            </>
           )}
         </div>
       </div>
