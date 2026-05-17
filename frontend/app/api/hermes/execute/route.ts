@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import {
   createWalletClient,
+  createPublicClient,
   http,
   parseGwei,
   parseUnits,
@@ -84,26 +85,29 @@ export async function POST(req: NextRequest) {
 
     const account = privateKeyToAccount(privateKey as `0x${string}`)
     const walletClient = createWalletClient({ account, chain: arcTestnet, transport: http(RPC) })
+    const publicClient = createPublicClient({ chain: arcTestnet, transport: http(RPC) })
 
     const marketStr = asset === 'BTC' ? 'BTC/USD' : 'ETH/USD'
     const marketKey = keccak256(stringToBytes(marketStr))
     const collateral = parseUnits(String(collateralUsdc), 6)
 
-    // 1. Fire-and-forget oracle price update
-    fetchPrice(asset).then((livePrice) => {
-      if (livePrice === null) return
+    // 1. Update oracle price and wait for confirmation before opening position.
+    // Sequential ordering ensures executeOpen reads the fresh price, not a stale one.
+    const livePrice = await fetchPrice(asset)
+    if (livePrice !== null) {
       const priceIn8Dec = BigInt(Math.round(livePrice * 1e8))
-      walletClient.writeContract({
+      const oracleHash = await walletClient.writeContract({
         address: oracleAddress as `0x${string}`,
         abi: ORACLE_ABI,
         functionName: 'updateMockPrice',
         args: [marketKey, priceIn8Dec as unknown as bigint],
         gasPrice: parseGwei('55'),
         gas: 100_000n,
-      }).catch(() => {})
-    }).catch(() => {})
+      })
+      await publicClient.waitForTransactionReceipt({ hash: oracleHash })
+    }
 
-    // 2. Submit executeOpen — returns tx hash immediately, doesn't wait for confirmation
+    // 2. Submit executeOpen — oracle now has the fresh price
     const hash = await walletClient.writeContract({
       address: vaultAddress as `0x${string}`,
       abi: VAULT_ABI,
