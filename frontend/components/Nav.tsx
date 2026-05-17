@@ -1,11 +1,14 @@
 'use client'
 
+import { useEffect } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useTheme } from 'next-themes'
+import { useAccount, useSwitchChain } from 'wagmi'
 import { ConnectButton } from '@rainbow-me/rainbowkit'
 import { Sun, Moon, Globe } from 'lucide-react'
 import { useLang } from '@/lib/lang-context'
+import { arcTestnet } from '@/lib/wagmi'
 
 const APP_LINKS = [
   { href: '/vault',       label: 'Vault' },
@@ -26,6 +29,14 @@ export function Nav() {
   const path = usePathname()
   const { resolvedTheme, setTheme } = useTheme()
   const { lang, setLang } = useLang()
+  const { isConnected, chainId } = useAccount()
+  const { switchChainAsync } = useSwitchChain()
+
+  useEffect(() => {
+    if (isConnected && chainId !== arcTestnet.id) {
+      switchChainAsync({ chainId: arcTestnet.id }).catch(() => {})
+    }
+  }, [isConnected, chainId, switchChainAsync])
 
   const isLanding = path === '/'
   const links = isLanding ? LANDING_LINKS : APP_LINKS
