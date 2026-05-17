@@ -147,7 +147,7 @@ export function Nav() {
                         params: [{
                           chainId: `0x${arcTestnet.id.toString(16)}`,
                           chainName: arcTestnet.name,
-                          nativeCurrency: arcTestnet.nativeCurrency,
+                          nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
                           rpcUrls: [...arcTestnet.rpcUrls.default.http],
                           blockExplorerUrls: arcTestnet.blockExplorers
                             ? [arcTestnet.blockExplorers.default.url]

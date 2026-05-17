@@ -15,7 +15,7 @@ import { createConfig, http, createStorage, cookieStorage } from 'wagmi'
 export const arcTestnet = defineChain({
   id: 5042002,
   name: 'Arc Testnet',
-  nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+  nativeCurrency: { name: 'USD Coin', symbol: 'USDC', decimals: 6 },
   rpcUrls: {
     default: { http: ['https://rpc.testnet.arc.network'] },
     public:  { http: ['https://rpc.testnet.arc.network'] },
