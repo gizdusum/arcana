@@ -66,13 +66,19 @@ function PositionRow({ positionId }: PositionRowProps) {
 
   if (!isOpen) return null
 
-  const pnlNum = pnl !== undefined ? Number(pnl) / 1e6 : 0
+  const entryNum = Number(entryPrice) / 1e8
+  const sizeNum = Number(size) / 1e6
+  // TODO(post-launch): mock oracle is only updated at trade-open. SL/TP/liquidation won't trigger between trades. Needs a periodic oracle pusher (cron or watcher) before this can be removed.
+  // Client-side P&L using live mark price; falls back to on-chain value when WebSocket not yet connected.
+  const pnlRaw = pnl !== undefined ? Number(pnl) / 1e6 : 0
+  const pnlNum = markPrice !== null
+    ? (isLong ? 1 : -1) * (markPrice - entryNum) / entryNum * sizeNum
+    : pnlRaw
   const pnlPct =
     collateral > 0n
       ? ((pnlNum / (Number(collateral) / 1e6)) * 100).toFixed(2)
       : '0.00'
   const pnlSign = pnlNum >= 0 ? '+' : ''
-  const entryNum = Number(entryPrice) / 1e8
   const levNum = Number(leverage)
   const liqBuffer = 1 / levNum
   const liqPrice = isLong ? entryNum * (1 - liqBuffer) : entryNum * (1 + liqBuffer)
