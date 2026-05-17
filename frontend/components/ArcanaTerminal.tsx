@@ -813,19 +813,36 @@ export function ArcanaTerminal() {
 
   const handleApprove = (msgId: string, proposal: Proposal) => {
     if (proposal.action === 'open_position') {
+      // TODO(post-launch): LLM system prompt at arcana-api conflates "vault
+      // balance" with "user share". Should say "your share of the vault is
+      // $X" not "vault balance is $X". Edit /opt/arcana-api/index.js system
+      // prompt section.
+
+      // Size guard (LLM produced malformed proposal)
       const sizeNeeded = proposal.size_usdc ?? 0
       if (sizeNeeded <= 0) {
-        addMsg({ role: 'system', content: 'The agent proposed a trade with no valid size. Please rephrase your request — try specifying the amount, e.g. "open $10 ETH long".' })
+        addMsg({ role: 'system', content: 'The agent proposed a trade with no valid size. Try rephrasing — e.g. "open $10 ETH long".' })
         return
       }
+
+      // Scenario A: both wallet AND vault share are empty — user hasn't onboarded yet
       if (vaultUsd === 0 && walletUsdc === 0) {
-        addMsg({ role: 'system', content: 'You need test USDC to trade. Get some from the Circle faucet.', action: { label: 'Open Faucet', href: 'https://faucet.circle.com' } })
+        addMsg({ role: 'system',
+          content: 'You need test USDC to participate. Get some from the Circle faucet, then deposit into the vault.',
+          action: { label: 'Open Faucet', href: 'https://faucet.circle.com' } })
         return
       }
-      if (vaultUsd < sizeNeeded) {
-        addMsg({ role: 'system', content: `Your vault balance is $${vaultUsd.toFixed(2)}, but this trade needs $${sizeNeeded.toFixed(2)} collateral. Deposit more USDC first.`, action: { label: 'Go to Vault', push: '/vault' } })
+
+      // Scenario B: wallet has USDC but user hasn't joined the vault yet
+      if (vaultUsd === 0 && walletUsdc > 0) {
+        addMsg({ role: 'system',
+          content: 'You have USDC in your wallet but no share in the ARCANA vault yet. Deposit to join — HERMES trades on behalf of all depositors.',
+          action: { label: 'Go to Vault', push: '/vault' } })
         return
       }
+
+      // Scenario C: user is a vault participant — proceed
+      // No per-user balance check. HERMES trades from the shared vault pool.
     }
     setConfirmPending({ msgId, proposal })
   }
