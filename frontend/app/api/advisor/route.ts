@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server'
 export const runtime = 'nodejs'
 export const dynamic = 'force-dynamic'
 
-const VPS_API_URL = 'http://187.124.91.33:3001'
+const VPS_API_URL = process.env.NEXT_PUBLIC_HERMES_API_URL || 'http://localhost:3001'
 
 export async function POST(req: NextRequest) {
   const body = await req.json()
