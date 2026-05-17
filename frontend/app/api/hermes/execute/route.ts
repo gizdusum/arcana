@@ -57,7 +57,8 @@ async function fetchPrice(asset: string): Promise<number | null> {
     const sym = asset === 'BTC' ? 'BTCUSDT' : 'ETHUSDT'
     const r = await fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${sym}`, { cache: 'no-store' })
     const d = await r.json()
-    return parseFloat(d.price)
+    const v = parseFloat(d.price)
+    return Number.isFinite(v) ? v : null
   } catch {
     return null
   }
