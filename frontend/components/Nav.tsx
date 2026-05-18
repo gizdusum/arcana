@@ -22,7 +22,7 @@ const LANDING_LINKS = [
   { href: '/#about',        label: 'About' },
   { href: '/#strategies',   label: 'Strategies' },
   { href: '/#how-it-works', label: 'How It Works' },
-  { href: '/#team',         label: 'Team' },
+  { href: '/team',          label: 'Team' },
 ]
 
 export function Nav() {
