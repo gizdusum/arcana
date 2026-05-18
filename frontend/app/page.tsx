@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import Image from 'next/image'
 import { useReadContract } from 'wagmi'
 import { VAULT_ADDRESS, VAULT_ABI } from '@/lib/contracts'
 import { useLang } from '@/lib/lang-context'
@@ -405,6 +406,153 @@ function HowItWorksSection() {
   )
 }
 
+// ─── Team Section ────────────────────────────────────
+
+function TeamSection() {
+  const members = [
+    {
+      slug: 'gizdusum',
+      name: 'gizdusum',
+      role: 'Founder & Technical Lead',
+      desc: 'Builds ARCANA\'s autonomous DeFi agent, smart contracts, vault logic, and on-chain execution layer.',
+      skills: ['Smart Contracts', 'Autonomous Agents', 'Vault Logic', 'On-chain Execution'],
+      links: [
+        { icon: 'x',      href: 'https://x.com/gizdusumandnode',  label: 'X profile' },
+        { icon: 'github', href: 'https://github.com/gizdusum',    label: 'GitHub profile' },
+      ],
+    },
+    {
+      slug: 'sirald',
+      name: 'Sirald',
+      role: 'Growth & Communications Lead',
+      desc: 'Leads ARCANA\'s community presence, marketing communication, AMAs, partnerships, and public updates.',
+      skills: ['Community', 'Marketing', 'AMAs', 'Partnerships'],
+      links: [
+        { icon: 'x', href: 'https://x.com/Sirald01', label: 'X profile' },
+      ],
+    },
+  ]
+
+  return (
+    <section
+      id="team"
+      className="py-28 px-6"
+      style={{ background: 'var(--bg)' }}
+    >
+      <div className="max-w-6xl mx-auto">
+        <div className="text-center mb-16">
+          <div className="font-mono text-xs tracking-widest uppercase mb-4" style={{ color: 'var(--ink-3)' }}>
+            Team
+          </div>
+          <h2
+            className="font-mono font-light tracking-tight mb-4"
+            style={{ fontSize: 'clamp(1.8rem, 3vw, 2.8rem)', color: 'var(--ink)' }}
+          >
+            TEAM
+          </h2>
+          <p className="font-mono text-sm" style={{ color: 'var(--ink-2)' }}>
+            The people building ARCANA.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-3xl mx-auto">
+          {members.map((m) => (
+            <div
+              key={m.slug}
+              className="flex flex-col rounded-sm"
+              style={{
+                background: 'var(--surface)',
+                border: '1px solid var(--border)',
+                padding: '1.5rem',
+              }}
+            >
+              {/* Avatar */}
+              <div className="flex items-center gap-4 mb-5">
+                <Image
+                  src={`/team/${m.slug}.jpg`}
+                  alt={m.name}
+                  width={96}
+                  height={96}
+                  className="rounded-full object-cover shrink-0"
+                  style={{ border: '1px solid var(--border-2)' }}
+                />
+                <div>
+                  <div
+                    className="font-mono text-lg font-medium tracking-wide mb-1"
+                    style={{ color: 'var(--ink)' }}
+                  >
+                    {m.name}
+                  </div>
+                  <div
+                    className="font-mono text-2xs uppercase tracking-widest"
+                    style={{ color: 'var(--ink-3)' }}
+                  >
+                    {m.role}
+                  </div>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div className="h-px mb-5" style={{ background: 'var(--border)' }} />
+
+              {/* Description */}
+              <p
+                className="font-mono text-xs leading-relaxed mb-5 flex-grow"
+                style={{ color: 'var(--ink-2)' }}
+              >
+                {m.desc}
+              </p>
+
+              {/* Skills */}
+              <div className="flex flex-wrap gap-2 mb-5">
+                {m.skills.map((skill) => (
+                  <span
+                    key={skill}
+                    className="font-mono text-2xs uppercase tracking-widest px-2.5 py-0.5 rounded-sm"
+                    style={{
+                      color: 'var(--ink-3)',
+                      border: '1px solid var(--border)',
+                    }}
+                  >
+                    {skill}
+                  </span>
+                ))}
+              </div>
+
+              {/* Links */}
+              <div className="flex items-center gap-3 mt-auto">
+                {m.links.map((l) => (
+                  <a
+                    key={l.href}
+                    href={l.href}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    aria-label={l.label}
+                    className="transition-colors"
+                    style={{ color: 'var(--ink-3)' }}
+                    onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--arc)' }}
+                    onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = 'var(--ink-3)' }}
+                  >
+                    {l.icon === 'x' ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.74l7.73-8.835L1.254 2.25H8.08l4.253 5.622zm-1.161 17.52h1.833L7.084 4.126H5.117z"/>
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <path d="M12 0C5.374 0 0 5.373 0 12c0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23A11.509 11.509 0 0 1 12 5.803c1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.627-5.373-12-12-12z"/>
+                      </svg>
+                    )}
+                  </a>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  )
+}
+
 // ─── Vision Section ───────────────────────────────────
 
 function VisionSection() {
@@ -681,6 +829,7 @@ export default function LandingPage() {
       <Hero />
       <StrategiesSection />
       <HowItWorksSection />
+      <TeamSection />
       <VisionSection />
       <CTASection />
       <Footer />
