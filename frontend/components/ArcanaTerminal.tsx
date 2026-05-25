@@ -947,6 +947,7 @@ export function ArcanaTerminal() {
       const reader = res.body.getReader()
       const dec = new TextDecoder()
       let buf = '', text2 = '', tools: string[] = [], proposal: Proposal | undefined
+      let sawDelta = false
 
       while (true) {
         const { done, value } = await reader.read()
@@ -960,8 +961,15 @@ export function ArcanaTerminal() {
           if (raw === '[DONE]') break
           try {
             const ev = JSON.parse(raw)
-            if (ev.type === 'text') {
-              text2 += ev.content
+            if (ev.type === 'delta') {
+              sawDelta = true
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId
+                  ? { ...m, content: m.content + ev.content, toolCalls: tools, pending: true }
+                  : m
+              ))
+            } else if (ev.type === 'text') {
+              if (!sawDelta) text2 += ev.content
             } else if (ev.type === 'tool_call') {
               tools = [...tools, ev.name]
               setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, toolCalls: tools, pending: true } : m))
@@ -976,7 +984,15 @@ export function ArcanaTerminal() {
       }
 
       if (joiningAgent) {
-        await new Promise<void>(resolve => typeText(assistantId, text2 || '—', tools, proposal, resolve))
+        if (sawDelta) {
+          setMessages(prev => prev.map(m => {
+            if (m.id !== assistantId) return m
+            const cleanContent = m.content.replace(/\[PROPOSAL:[\s\S]*?\]/, '').trim()
+            return { ...m, content: cleanContent || '—', pending: false, proposal }
+          }))
+        } else {
+          await new Promise<void>(resolve => typeText(assistantId, text2 || '—', tools, proposal, resolve))
+        }
 
         setActiveAgents(prev => prev.includes(joiningAgent) ? prev : [...prev, joiningAgent])
         setMessages(prev => [...prev, {
@@ -996,7 +1012,6 @@ export function ArcanaTerminal() {
 
         try {
           const secondaryHistory = [
-            ...history.slice(0, -1),
             { role: 'user' as const, content: `${text}\n\nReply in 1-2 short sentences, in character, no fluff.` },
           ]
           const res2 = await fetch('/api/advisor', {
@@ -1009,6 +1024,7 @@ export function ArcanaTerminal() {
           const reader2 = res2.body.getReader()
           const dec2 = new TextDecoder()
           let buf2 = '', text3 = '', proposal2: Proposal | undefined
+          let sawDelta2 = false
 
           while (true) {
             const { done, value } = await reader2.read()
@@ -1022,16 +1038,33 @@ export function ArcanaTerminal() {
               if (raw2 === '[DONE]') break
               try {
                 const ev2 = JSON.parse(raw2)
-                if (ev2.type === 'text') text3 += ev2.content
-                else if (ev2.type === 'proposal') proposal2 = ev2 as Proposal
-                else if (ev2.type === 'error') {
+                if (ev2.type === 'delta') {
+                  sawDelta2 = true
+                  setMessages(prev => prev.map(m =>
+                    m.id === secondaryId
+                      ? { ...m, content: m.content + ev2.content, pending: true }
+                      : m
+                  ))
+                } else if (ev2.type === 'text') {
+                  if (!sawDelta2) text3 += ev2.content
+                } else if (ev2.type === 'proposal') {
+                  proposal2 = ev2 as Proposal
+                } else if (ev2.type === 'error') {
                   text3 = `⚠ ${ev2.message}`
                   setMessages(prev => prev.map(m => m.id === secondaryId ? { ...m, content: text3, pending: false } : m))
                 }
               } catch {}
             }
           }
-          await new Promise<void>(resolve => typeText(secondaryId, text3 || '—', [], proposal2, resolve))
+          if (sawDelta2) {
+            setMessages(prev => prev.map(m => {
+              if (m.id !== secondaryId) return m
+              const cleanContent = m.content.replace(/\[PROPOSAL:[\s\S]*?\]/, '').trim()
+              return { ...m, content: cleanContent || '—', pending: false, proposal: proposal2 }
+            }))
+          } else {
+            await new Promise<void>(resolve => typeText(secondaryId, text3 || '—', [], proposal2, resolve))
+          }
         } catch (err2) {
           setMessages(prev => prev.map(m => m.id === secondaryId
             ? { ...m, content: `Connection error: ${err2 instanceof Error ? err2.message : 'unknown'}`, pending: false }
@@ -1039,7 +1072,15 @@ export function ArcanaTerminal() {
           ))
         }
       } else {
-        typeText(assistantId, text2 || '—', tools, proposal)
+        if (sawDelta) {
+          setMessages(prev => prev.map(m => {
+            if (m.id !== assistantId) return m
+            const cleanContent = m.content.replace(/\[PROPOSAL:[\s\S]*?\]/, '').trim()
+            return { ...m, content: cleanContent || '—', pending: false, proposal }
+          }))
+        } else {
+          typeText(assistantId, text2 || '—', tools, proposal)
+        }
       }
     } catch (err) {
       setMessages((prev) => prev.map((m) =>
