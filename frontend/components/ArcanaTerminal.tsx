@@ -34,6 +34,7 @@ type Message = {
   proposal?: Proposal
   pending?: boolean
   action?: MessageAction
+  agent?: Strategy
 }
 
 type MessageAction = { label: string; href?: string; push?: string }
@@ -638,6 +639,23 @@ function StrategySelector({ onSelect }: { onSelect: (s: Strategy) => void }) {
   )
 }
 
+// ─── Multi-agent helpers ──────────────────────────────────────────────────────
+
+function hasTradeIntent(text: string): boolean {
+  const t = text.toLowerCase()
+  return ['long', 'short', 'open', 'aç', 'pozisyon', 'position', 'buy', 'sell',
+          'leverage', 'kaldıraç', 'büyüt', 'scale'].some(k => t.includes(k))
+}
+
+function escalatingAgent(text: string, active: Strategy[]): Strategy | null {
+  const t = text.toLowerCase()
+  const aresKw = ['10x', '9x', '8x', 'max leverage', 'all in', 'aggressive', 'yolo']
+  const atlasKw = ['short', 'hedge', 'both sides', '5x']
+  if (!active.includes('ARES') && aresKw.some(k => t.includes(k))) return 'ARES'
+  if (!active.includes('ATLAS') && atlasKw.some(k => t.includes(k))) return 'ATLAS'
+  return null
+}
+
 // ─── Main terminal ────────────────────────────────────────────────────────────
 
 export function ArcanaTerminal() {
@@ -679,6 +697,7 @@ export function ArcanaTerminal() {
   const [loading, setLoading] = useState(false)
   const [executingId, setExecutingId] = useState<string | null>(null)
   const [started, setStarted] = useState(false)
+  const [activeAgents, setActiveAgents] = useState<Strategy[]>([])
   const [confirmPending, setConfirmPending] = useState<ConfirmPending>(null)
 
   const messagesRef = useRef<HTMLDivElement>(null)
@@ -704,7 +723,7 @@ export function ArcanaTerminal() {
 
   useEffect(() => () => cancelTyping(), [cancelTyping])
 
-  const typeText = useCallback((id: string, fullText: string, toolsList: string[], finalProposal?: Proposal) => {
+  const typeText = useCallback((id: string, fullText: string, toolsList: string[], finalProposal?: Proposal, onComplete?: () => void) => {
     cancelTyping()
     const words = fullText.split(' ')
     let wordIndex = 0
@@ -714,6 +733,7 @@ export function ArcanaTerminal() {
           m.id === id ? { ...m, content: fullText, toolCalls: toolsList, pending: false, proposal: finalProposal } : m
         ))
         typingRef.current = null
+        onComplete?.()
         return
       }
       const partial = words.slice(0, wordIndex + 1).join(' ')
@@ -731,17 +751,19 @@ export function ArcanaTerminal() {
   const selectStrategy = (s: Strategy) => {
     const strat = STRATS.find((st) => st.id === s)!
     setSelectedStrategy(s)
+    setActiveAgents([s])
     setStarted(true)
     setMessages([
       {
         id: 'init',
         role: 'system',
-        content: `${s} strategy active.`,
+        content: `${s} joined the channel.`,
       },
       {
         id: 'greeting',
         role: 'assistant',
         content: strat.greeting,
+        agent: s,
       },
     ])
     setTimeout(() => textareaRef.current?.focus(), 100)
@@ -891,6 +913,9 @@ export function ArcanaTerminal() {
   const sendMessage = async () => {
     const text = input.trim()
     if (!text || loading) return
+
+    const joiningAgent = hasTradeIntent(text) ? escalatingAgent(text, activeAgents) : null
+
     const assistantId = `a-${Date.now()}`
     const history = messages
       .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content)
@@ -900,7 +925,7 @@ export function ArcanaTerminal() {
     setMessages((prev) => [
       ...prev,
       { id: `u-${Date.now()}`, role: 'user', content: text },
-      { id: assistantId, role: 'assistant', content: '', pending: true },
+      { id: assistantId, role: 'assistant', content: '', pending: true, agent: selectedStrategy ?? undefined },
     ])
     setInput('')
     setLoading(true)
@@ -908,10 +933,14 @@ export function ArcanaTerminal() {
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     try {
+      const primaryHistory = joiningAgent
+        ? [...history.slice(0, -1), { role: 'user' as const, content: `${text}\n\nReply in 1-2 short sentences, in character, no fluff.` }]
+        : history
+
       const res = await fetch('/api/advisor', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: history, userAddress: address, strategy: selectedStrategy }),
+        body: JSON.stringify({ messages: primaryHistory, userAddress: address, strategy: selectedStrategy }),
       })
       if (!res.ok || !res.body) throw new Error(`API ${res.status}`)
 
@@ -945,7 +974,73 @@ export function ArcanaTerminal() {
           } catch {}
         }
       }
-      typeText(assistantId, text2 || '—', tools, proposal)
+
+      if (joiningAgent) {
+        await new Promise<void>(resolve => typeText(assistantId, text2 || '—', tools, proposal, resolve))
+
+        setActiveAgents(prev => prev.includes(joiningAgent) ? prev : [...prev, joiningAgent])
+        setMessages(prev => [...prev, {
+          id: `sys-join-${Date.now()}`,
+          role: 'system' as const,
+          content: `${joiningAgent} joined the channel.`,
+        }])
+
+        const secondaryId = `a2-${Date.now()}`
+        setMessages(prev => [...prev, {
+          id: secondaryId,
+          role: 'assistant' as const,
+          content: '',
+          pending: true,
+          agent: joiningAgent,
+        }])
+
+        try {
+          const secondaryHistory = [
+            ...history.slice(0, -1),
+            { role: 'user' as const, content: `${text}\n\nReply in 1-2 short sentences, in character, no fluff.` },
+          ]
+          const res2 = await fetch('/api/advisor', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: secondaryHistory, userAddress: address, strategy: joiningAgent }),
+          })
+          if (!res2.ok || !res2.body) throw new Error(`API ${res2.status}`)
+
+          const reader2 = res2.body.getReader()
+          const dec2 = new TextDecoder()
+          let buf2 = '', text3 = '', proposal2: Proposal | undefined
+
+          while (true) {
+            const { done, value } = await reader2.read()
+            if (done) break
+            buf2 += dec2.decode(value, { stream: true })
+            const lines2 = buf2.split('\n')
+            buf2 = lines2.pop() ?? ''
+            for (const line of lines2) {
+              if (!line.startsWith('data: ')) continue
+              const raw2 = line.slice(6)
+              if (raw2 === '[DONE]') break
+              try {
+                const ev2 = JSON.parse(raw2)
+                if (ev2.type === 'text') text3 += ev2.content
+                else if (ev2.type === 'proposal') proposal2 = ev2 as Proposal
+                else if (ev2.type === 'error') {
+                  text3 = `⚠ ${ev2.message}`
+                  setMessages(prev => prev.map(m => m.id === secondaryId ? { ...m, content: text3, pending: false } : m))
+                }
+              } catch {}
+            }
+          }
+          await new Promise<void>(resolve => typeText(secondaryId, text3 || '—', [], proposal2, resolve))
+        } catch (err2) {
+          setMessages(prev => prev.map(m => m.id === secondaryId
+            ? { ...m, content: `Connection error: ${err2 instanceof Error ? err2.message : 'unknown'}`, pending: false }
+            : m
+          ))
+        }
+      } else {
+        typeText(assistantId, text2 || '—', tools, proposal)
+      }
     } catch (err) {
       setMessages((prev) => prev.map((m) =>
         m.id === assistantId
@@ -1069,13 +1164,15 @@ export function ArcanaTerminal() {
                     <span style={{ color: 'var(--ink)' }}>{msg.content}</span>
                   </div>
                 )}
-                {msg.role === 'assistant' && (
+                {msg.role === 'assistant' && (() => {
+                  const msgAccent = STRATS.find(s => s.id === (msg.agent ?? selectedStrategy))?.accent ?? 'var(--arc)'
+                  return (
                   <div className="flex gap-2 font-mono text-xs">
                     <span
                       className="shrink-0 font-bold text-xs"
-                      style={{ color: activeStrat?.accent ?? 'var(--arc)' }}
+                      style={{ color: msgAccent }}
                     >
-                      {selectedStrategy ?? 'A'}
+                      {(msg.agent ?? selectedStrategy) ?? 'A'}
                     </span>
                     <div className="flex-1 min-w-0">
                       {(msg.toolCalls?.length ?? 0) > 0 && (
@@ -1097,12 +1194,12 @@ export function ArcanaTerminal() {
                         </div>
                       )}
                       {msg.pending && !msg.content ? (
-                        <span className="inline-block w-1.5 h-3.5 align-middle cursor-blink" style={{ background: activeStrat?.accent ?? 'var(--arc)' }} />
+                        <span className="inline-block w-1.5 h-3.5 align-middle cursor-blink" style={{ background: msgAccent }} />
                       ) : (
                         <span className="whitespace-pre-wrap leading-relaxed break-words" style={{ color: 'var(--ink-2)' }}>
                           {msg.content}
                           {msg.pending && (
-                            <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle cursor-blink" style={{ background: activeStrat?.accent ?? 'var(--arc)' }} />
+                            <span className="inline-block w-1.5 h-3.5 ml-0.5 align-middle cursor-blink" style={{ background: msgAccent }} />
                           )}
                         </span>
                       )}
@@ -1116,7 +1213,8 @@ export function ArcanaTerminal() {
                       )}
                     </div>
                   </div>
-                )}
+                  )
+                })()}
               </div>
             ))}
           </div>
