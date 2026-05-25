@@ -199,19 +199,31 @@ function useMarkPrice(market: string | null) {
     const isBtc = market.includes('BTC')
     const restSym = isBtc ? 'BTCUSDT' : 'ETHUSDT'
     const wsSym  = isBtc ? 'btcusdt'  : 'ethusdt'
+    let cancelled = false
+    let ws: WebSocket | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
 
-    // REST cold-start: populate before WebSocket sends its first tick
-    fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${restSym}`, { cache: 'no-store' })
-      .then(r => r.json())
-      .then(d => { if (d?.price) setPrice(prev => prev === null ? Number(d.price) : prev) })
-      .catch(() => {})
-
-    const ws = new WebSocket(`wss://stream.binance.com:9443/ws/${wsSym}@miniTicker`)
-    ws.onmessage = (e) => {
-      try { setPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
+    const connect = () => {
+      if (cancelled) return
+      // REST cold-start: populate before WebSocket sends its first tick
+      fetch(`https://api.binance.com/api/v3/ticker/price?symbol=${restSym}`, { cache: 'no-store' })
+        .then(r => r.json())
+        .then(d => { if (d?.price) setPrice(prev => prev === null ? Number(d.price) : prev) })
+        .catch(() => {})
+      ws = new WebSocket(`wss://stream.binance.com:9443/ws/${wsSym}@miniTicker`)
+      ws.onmessage = (e) => {
+        try { setPrice(parseFloat(JSON.parse(e.data).c)) } catch {}
+      }
+      ws.onerror = () => { ws?.close() }
+      ws.onclose = () => { if (!cancelled) retryTimer = setTimeout(connect, 3000) }
     }
-    ws.onerror = () => ws.close()
-    return () => ws.close()
+
+    connect()
+    return () => {
+      cancelled = true
+      if (retryTimer !== null) clearTimeout(retryTimer)
+      ws?.close()
+    }
   }, [market])
   return price
 }
