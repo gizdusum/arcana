@@ -115,7 +115,11 @@ Active strategy: ${char.title} (${char.leverage}, ${char.direction})
 USER_VAULT_BALANCE_USD: ${balance.toFixed(2)}
 
 === LANGUAGE ===
-Always respond in English, regardless of the user's input language.
+Detect the language of the user's most recent message and respond ENTIRELY
+in that same language. If the user writes in Turkish, respond fully in
+Turkish. If in English, respond fully in English. Never mix languages in a
+single response. Keep all [PROPOSAL] JSON keys and values in English
+regardless of response language.
 
 === INTENT DETECTION ===
 Identify the user's intent from their message. Respond accordingly:
@@ -184,12 +188,13 @@ ONE of these at the end of your response:
   round down, or suggest a different size based on your own preferences.
 - NEVER silently change trade parameters. Always be explicit if you're rejecting
   or asking for adjustment.
-- Keep responses concise. 2-4 sentences for greetings and analysis. Proposals
-  use the structured format.
+- Length by intent: greetings and trade requests → 1-2 short sentences.
+  Analysis/market opinion → 3-5 sentences max. Never write long paragraphs.
+  Proposals use the structured format.
 `
 }
 
-async function callOpenRouter(messages, attempt = 1) {
+async function callOpenRouter(messages, onDelta, attempt = 1) {
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), 30000)
   try {
@@ -207,6 +212,7 @@ async function callOpenRouter(messages, attempt = 1) {
         temperature: 0.15,
         top_p: 0.85,
         repetition_penalty: 1.15,
+        stream: true,
         messages,
       }),
       signal: controller.signal,
@@ -214,18 +220,42 @@ async function callOpenRouter(messages, attempt = 1) {
     clearTimeout(timeoutId)
     if ((res.status === 429 || res.status >= 500) && attempt === 1) {
       await new Promise(r => setTimeout(r, 1000))
-      return callOpenRouter(messages, 2)
+      return callOpenRouter(messages, onDelta, 2)
     }
     if (!res.ok) {
       const errText = await res.text()
       return { error: `Model error ${res.status}: ${errText.slice(0, 200)}` }
     }
-    return await res.json()
+    const reader = res.body.getReader()
+    const dec = new TextDecoder()
+    let buf = ''
+    let fullContent = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      const lines = buf.split('\n')
+      buf = lines.pop() ?? ''
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue
+        const raw = line.slice(6).trim()
+        if (raw === '[DONE]') continue
+        try {
+          const chunk = JSON.parse(raw)
+          const delta = chunk.choices?.[0]?.delta?.content ?? ''
+          if (delta) {
+            fullContent += delta
+            onDelta(delta)
+          }
+        } catch {}
+      }
+    }
+    return { fullContent }
   } catch (err) {
     clearTimeout(timeoutId)
     if (err.name === "AbortError" && attempt === 1) {
       await new Promise(r => setTimeout(r, 1000))
-      return callOpenRouter(messages, 2)
+      return callOpenRouter(messages, onDelta, 2)
     }
     return { error: "Service temporarily unavailable. Please try again." }
   }
@@ -249,7 +279,9 @@ app.post("/api/advisor", async (req, res) => {
       ...(messages || []).map((m) => ({ role: m.role, content: m.content })),
     ]
 
-    const data = await callOpenRouter(history)
+    const data = await callOpenRouter(history, (delta) => {
+      send({ type: "delta", content: delta })
+    })
 
     if (data.error) {
       send({ type: "error", message: data.error })
@@ -258,13 +290,9 @@ app.post("/api/advisor", async (req, res) => {
       return
     }
 
-    let content = data.choices?.[0]?.message?.content ?? ""
-
-    // Strip non-latin garbage (CJK, Arabic, etc.) that sometimes bleeds in from model
-    content = content.replace(/[一-鿿぀-ヿ＀-￯؀-ۿ]/g, "").trim()
-
-    const proposalMatch = content.match(/\[PROPOSAL:\s*(\{[\s\S]*?\})\]/)
-    const cleanText = content.replace(/\[PROPOSAL:[\s\S]*?\]/g, "").trim()
+    const fullContent = data.fullContent ?? ''
+    const proposalMatch = fullContent.match(/\[PROPOSAL:\s*(\{[\s\S]*?\})\]/)
+    const cleanText = fullContent.replace(/\[PROPOSAL:[\s\S]*?\]/g, "").trim()
 
     if (cleanText) send({ type: "text", content: cleanText })
     if (proposalMatch) {
