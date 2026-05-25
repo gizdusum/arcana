@@ -683,6 +683,7 @@ export function ArcanaTerminal() {
 
   const messagesRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const typingRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const el = messagesRef.current
@@ -693,6 +694,39 @@ export function ArcanaTerminal() {
   const addMsg = useCallback((msg: Omit<Message, 'id'>) => {
     setMessages((prev) => [...prev, { ...msg, id: `${Date.now()}-${Math.random()}` }])
   }, [])
+
+  const cancelTyping = useCallback(() => {
+    if (typingRef.current !== null) {
+      clearTimeout(typingRef.current)
+      typingRef.current = null
+    }
+  }, [])
+
+  useEffect(() => () => cancelTyping(), [cancelTyping])
+
+  const typeText = useCallback((id: string, fullText: string, toolsList: string[], finalProposal?: Proposal) => {
+    cancelTyping()
+    const words = fullText.split(' ')
+    let wordIndex = 0
+    const next = () => {
+      if (wordIndex >= words.length) {
+        setMessages(prev => prev.map(m =>
+          m.id === id ? { ...m, content: fullText, toolCalls: toolsList, pending: false, proposal: finalProposal } : m
+        ))
+        typingRef.current = null
+        return
+      }
+      const partial = words.slice(0, wordIndex + 1).join(' ')
+      setMessages(prev => prev.map(m =>
+        m.id === id ? { ...m, content: partial, toolCalls: toolsList, pending: true } : m
+      ))
+      const isSentenceEnd = '.?!'.includes(words[wordIndex].slice(-1))
+      wordIndex++
+      const delay = 18 + Math.random() * 27 + (isSentenceEnd ? 250 + Math.random() * 150 : 0)
+      typingRef.current = setTimeout(next, delay)
+    }
+    next()
+  }, [cancelTyping])
 
   const selectStrategy = (s: Strategy) => {
     const strat = STRATS.find((st) => st.id === s)!
@@ -870,6 +904,7 @@ export function ArcanaTerminal() {
     ])
     setInput('')
     setLoading(true)
+    cancelTyping()
     if (textareaRef.current) textareaRef.current.style.height = 'auto'
 
     try {
@@ -898,7 +933,6 @@ export function ArcanaTerminal() {
             const ev = JSON.parse(raw)
             if (ev.type === 'text') {
               text2 += ev.content
-              setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, content: text2, toolCalls: tools, pending: false } : m))
             } else if (ev.type === 'tool_call') {
               tools = [...tools, ev.name]
               setMessages((prev) => prev.map((m) => m.id === assistantId ? { ...m, toolCalls: tools, pending: true } : m))
@@ -911,9 +945,7 @@ export function ArcanaTerminal() {
           } catch {}
         }
       }
-      setMessages((prev) => prev.map((m) =>
-        m.id === assistantId ? { ...m, content: text2 || '—', toolCalls: tools, proposal, pending: false } : m
-      ))
+      typeText(assistantId, text2 || '—', tools, proposal)
     } catch (err) {
       setMessages((prev) => prev.map((m) =>
         m.id === assistantId
