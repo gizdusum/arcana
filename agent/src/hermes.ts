@@ -30,6 +30,14 @@ const MIN_COLLATERAL = 10_000_000n
 // Fraction of vault balance to use per trade (10%)
 const COLLATERAL_FRACTION = 0.10
 
+// ─── Guardrail constants ──────────────────────────────────────────────────────
+const SCALE_IN_ENABLED       = true
+const SCALE_IN_MAX_PCT       = 0.50          // max 50% of existing collateral per add
+const SCALE_IN_MIN_PROFIT_PCT = 0.05         // only scale in when ≥+5% in profit
+const SCALE_IN_COOLDOWN_MS   = 5 * 60 * 1000 // 5 min between adds in same direction
+const MAX_TOTAL_EXPOSURE_PCT = 0.25          // total open collateral ≤ 25% of vault
+const HARD_STOP_THRESHOLD    = -0.40         // close when ≥40% of collateral is lost
+
 export class HermesAgent {
   private isRunning = false
   private cycleCount = 0
@@ -118,6 +126,9 @@ export class HermesAgent {
     // 4. Manage existing positions (stop-loss / take-profit)
     await this._managePositions(positions, prices)
 
+    // 4b. Enforce protocol guardrails (hard-stop before liquidation)
+    await this._enforceGuardrails(positions, prices)
+
     // 5. Re-fetch positions after potential closures
     const currentPositions = await this._fetchPositions()
 
@@ -194,6 +205,49 @@ export class HermesAgent {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Guardrails
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private async _enforceGuardrails(positions: Position[], prices: PriceMap): Promise<void> {
+    for (const pos of positions) {
+      if (!pos.isOpen) continue
+
+      const marketStr = this._marketKeyToString(pos.market)
+      const currentPrice = prices[marketStr as keyof PriceMap] ?? 0
+      if (currentPrice === 0) continue
+
+      const pnlPct = this._calculatePnLPercent(pos, currentPrice)
+
+      if (pnlPct <= HARD_STOP_THRESHOLD) {
+        const closeReason = `Hard-stop: PnL=${(pnlPct * 100).toFixed(2)}% ≤ ${(HARD_STOP_THRESHOLD * 100).toFixed(0)}% — closing #${pos.id}`
+        console.log(`[HERMES] 🛑 ${closeReason}`)
+        try {
+          const result = await this.executor.executeVaultTx('executeClose', [pos.id])
+          const decision: HermesDecision = {
+            id: `${Date.now()}-hardstop-${pos.id}`,
+            timestamp: Date.now(),
+            strategy: this.strategy.name as StrategyType,
+            action: 'CLOSE',
+            market: marketStr,
+            confidence: 0.99,
+            reasoning: closeReason,
+            priceAtDecision: currentPrice,
+            positionId: Number(pos.id),
+            txHash: result.hash,
+          }
+          await this.logger.record(decision)
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          // "Position not open" is expected on double-close; swallow silently
+          if (!msg.includes('not open')) {
+            console.error(`[HERMES] Hard-stop executeClose failed for #${pos.id}: ${msg}`)
+          }
+        }
+      }
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Signal Execution
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -210,29 +264,94 @@ export class HermesAgent {
 
     try {
       if (signal.action === 'OPEN_LONG' || signal.action === 'OPEN_SHORT') {
-        // Determine collateral: fraction of vault balance
+        // Determine base collateral: fraction of vault balance
         const vaultBalance = await this._getVaultBalance()
         const collateral = this._computeCollateral(vaultBalance, signal.confidence)
-
-        if (collateral < MIN_COLLATERAL) {
-          console.warn(
-            `[HERMES] Insufficient collateral: ${collateral} < ${MIN_COLLATERAL}. Skipping.`
-          )
-          return
-        }
 
         const isLong = signal.action === 'OPEN_LONG'
         const leverage = signal.leverage ?? this.strategy.maxLeverage
 
+        // ── Guardrail: fetch current open positions for checks ───────────────
+        const allOpen = await this._fetchPositions()
+        const openPositions = allOpen.filter((p) => p.isOpen)
+        const sameDir = openPositions.filter((p) => p.isLong === isLong)
+
+        let finalCollateral = collateral
+
+        // ── a/b) Scale-in check ──────────────────────────────────────────────
+        if (sameDir.length > 0) {
+          // This is a scale-in attempt (same-direction position already open)
+          if (!SCALE_IN_ENABLED) {
+            console.log(`[HERMES] Scale-in disabled — skipping additional ${isLong ? 'LONG' : 'SHORT'} on ${market}`)
+            return
+          }
+
+          // Require at least one same-direction position to be profitable
+          const anyProfitable = sameDir.some((p) => {
+            const currentPrice = prices[this._marketKeyToString(p.market) as keyof PriceMap] ?? 0
+            return currentPrice > 0 && this._calculatePnLPercent(p, currentPrice) >= SCALE_IN_MIN_PROFIT_PCT
+          })
+          if (!anyProfitable) {
+            console.log(
+              `[HERMES] Scale-in blocked — no same-direction position is ≥+${(SCALE_IN_MIN_PROFIT_PCT * 100).toFixed(0)}% profit (no averaging down)`
+            )
+            return
+          }
+
+          // Cooldown: block if most recent same-direction open was within cooldown window
+          const latestOpenedAt = sameDir.reduce(
+            (max, p) => (p.openedAt > max ? p.openedAt : max),
+            0n
+          )
+          const msSinceLastOpen = Date.now() - Number(latestOpenedAt) * 1000
+          if (msSinceLastOpen < SCALE_IN_COOLDOWN_MS) {
+            console.log(
+              `[HERMES] Scale-in cooldown active — ${Math.ceil((SCALE_IN_COOLDOWN_MS - msSinceLastOpen) / 1000)}s remaining`
+            )
+            return
+          }
+
+          // Cap new collateral at SCALE_IN_MAX_PCT of existing same-direction collateral
+          const existingCollateral = sameDir.reduce((sum, p) => sum + p.collateral, 0n)
+          const scaleInCap = BigInt(Math.floor(Number(existingCollateral) * SCALE_IN_MAX_PCT))
+          if (collateral > scaleInCap) {
+            console.log(
+              `[HERMES] Scale-in cap applied: ${Number(collateral) / 1e6} → ${Number(scaleInCap) / 1e6} USDC`
+            )
+            finalCollateral = scaleInCap
+          }
+        }
+
+        // ── c) Total exposure cap ────────────────────────────────────────────
+        const totalLocked = openPositions.reduce((sum, p) => sum + p.collateral, 0n)
+        const projectedTotal = totalLocked + finalCollateral
+        const exposurePct = vaultBalance > 0n ? Number(projectedTotal) / Number(vaultBalance) : 1
+        if (exposurePct > MAX_TOTAL_EXPOSURE_PCT) {
+          console.log(
+            `[HERMES] Exposure cap: projected ${(exposurePct * 100).toFixed(1)}% > ${(MAX_TOTAL_EXPOSURE_PCT * 100).toFixed(0)}% of vault — skipping`
+          )
+          return
+        }
+
+        // ── d) Minimum collateral check (post-guardrail) ─────────────────────
+        if (finalCollateral < MIN_COLLATERAL) {
+          console.warn(
+            `[HERMES] Post-guardrail collateral ${Number(finalCollateral) / 1e6} USDC < min ${Number(MIN_COLLATERAL) / 1e6} USDC — skipping`
+          )
+          return
+        }
+
+        // ── Execute ──────────────────────────────────────────────────────────
         console.log(
           `[HERMES] Opening ${isLong ? 'LONG' : 'SHORT'} on ${market} ` +
-          `| collateral=${Number(collateral) / 1e6} USDC | leverage=${leverage}x`
+          `| collateral=${Number(finalCollateral) / 1e6} USDC | leverage=${leverage}x` +
+          (sameDir.length > 0 ? ' [scale-in]' : '')
         )
 
         const result = await this.executor.executeVaultTx('executeOpen', [
           marketKey,
           isLong,
-          collateral,
+          finalCollateral,
           leverage,
         ])
         txHash = result.hash
