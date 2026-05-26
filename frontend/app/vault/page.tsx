@@ -224,7 +224,6 @@ function DepositForm() {
           functionName: 'approve',
           args: [VAULT_ADDRESS, amountBigint],
           gasPrice: parseGwei('55'),
-          gas: 100_000n,
         })
         setPendingHash(approveHash)
         setStatus('awaiting-approve')
@@ -256,7 +255,6 @@ function DepositForm() {
         functionName: 'deposit',
         args: [amountBigint, address!],
         gasPrice: parseGwei('55'),
-        gas: 300_000n,
       })
 
       // Don't block — show submitted state immediately so user isn't stuck
