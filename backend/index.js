@@ -1,5 +1,6 @@
 import express from "express"
 import cors from "cors"
+import crypto from "crypto"
 
 const app = express()
 const PORT = 3001
@@ -7,7 +8,70 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
 const MODEL = "nousresearch/hermes-3-llama-3.1-70b"
 const VAULT_ADDRESS = "0x5e1ac795fEF51F6F261890Bb4d0119aD1f097D21"
 
+// --- Circle Contract Monitoring webhook state ---
+const vaultActivityCache = [] // en fazla MAX_CACHE event, en yeni en başta
+const MAX_CACHE = 50
+
 app.use(cors())
+
+// Circle webhook route: HMAC imzası ham body üzerinden doğrulandığı için
+// GLOBAL express.json()'DAN ÖNCE, kendi express.raw() middleware'i ile mount edilir.
+app.post("/webhooks/circle", express.raw({ type: "application/json" }), (req, res) => {
+  const secret = process.env.CIRCLE_WEBHOOK_SECRET
+  if (!secret) return res.status(503).json({ error: "Webhook not configured" })
+
+  const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? "")
+  // Circle standart imza header'ı; docs netleşince tek yerden değiştirilir.
+  const signature = req.get("X-Circle-Signature") || ""
+  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex")
+
+  const sigBuf = Buffer.from(signature)
+  const expBuf = Buffer.from(expected)
+  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+    return res.status(401).json({ error: "Invalid signature" })
+  }
+
+  let payload
+  try {
+    payload = JSON.parse(rawBody.toString("utf8"))
+  } catch {
+    return res.status(400).json({ error: "Invalid JSON" })
+  }
+
+  // Circle payload şeması kesin değil; olası alan yollarını savunmacı biçimde tara.
+  const n = payload.notification || payload.event || payload
+  const eventName = n.eventName || n.event || n.name || payload.eventName || "UnknownEvent"
+  const contractAddress = n.contractAddress || n.address || payload.contractAddress || VAULT_ADDRESS
+  const block = n.blockHeight ?? n.blockNumber ?? n.block ?? payload.blockHeight ?? null
+  const txHash = n.txHash || n.transactionHash || payload.txHash || null
+  const rawArgs = n.args || n.eventParameters || n.params || {}
+
+  // Deposit/Withdraw için from/to/amount normalize et.
+  const from = rawArgs.from ?? rawArgs.sender ?? rawArgs.owner ?? null
+  const to = rawArgs.to ?? rawArgs.receiver ?? null
+  const amount = rawArgs.amount ?? rawArgs.assets ?? rawArgs.value ?? null
+
+  const activity = {
+    eventName,
+    contractAddress,
+    block,
+    txHash,
+    from,
+    to,
+    amount,
+    args: rawArgs,
+    receivedAt: new Date().toISOString(),
+  }
+
+  vaultActivityCache.unshift(activity)
+  if (vaultActivityCache.length > MAX_CACHE) vaultActivityCache.length = MAX_CACHE
+
+  console.log(`Circle webhook: ${eventName} @ ${block ?? "?"}`)
+  return res.status(200).json({ received: true })
+})
+
+app.get("/api/vault-activity", (_, res) => res.json({ events: vaultActivityCache }))
+
 app.use(express.json())
 
 const hexToNum = (hex, dec) => {
