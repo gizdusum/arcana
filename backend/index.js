@@ -7,67 +7,86 @@ const PORT = 3001
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY
 const MODEL = "nousresearch/hermes-3-llama-3.1-70b"
 const VAULT_ADDRESS = "0x5e1ac795fEF51F6F261890Bb4d0119aD1f097D21"
+const CIRCLE_API_KEY = process.env.CIRCLE_API_KEY
 
 // --- Circle Contract Monitoring webhook state ---
 const vaultActivityCache = [] // en fazla MAX_CACHE event, en yeni en başta
 const MAX_CACHE = 50
+const circlePublicKeyCache = new Map() // keyId → crypto.KeyObject (Circle: public key statiktir)
+
+// Circle webhook imzası asymmetric ECDSA (P-256/SHA-256, DER). Doğrulama için
+// X-Circle-Key-Id ile Circle API'dan SPKI public key çekilir ve cache'lenir.
+async function getCirclePublicKey(keyId) {
+  if (circlePublicKeyCache.has(keyId)) return circlePublicKeyCache.get(keyId)
+  if (!CIRCLE_API_KEY) throw new Error("CIRCLE_API_KEY not configured")
+  const res = await fetch(`https://api.circle.com/v2/notifications/publicKey/${keyId}`, {
+    headers: { Authorization: `Bearer ${CIRCLE_API_KEY}`, Accept: "application/json" },
+  })
+  if (!res.ok) throw new Error(`publicKey fetch failed: ${res.status}`)
+  const data = await res.json()
+  // Şema kesin değil: wrapper'lı (data.data.publicKey) veya düz (data.publicKey).
+  const pkBase64 = data?.data?.publicKey || data?.publicKey
+  if (!pkBase64) throw new Error("publicKey field missing in response")
+  const derBytes = Buffer.from(pkBase64, "base64")
+  const keyObj = crypto.createPublicKey({ key: derBytes, format: "der", type: "spki" })
+  circlePublicKeyCache.set(keyId, keyObj)
+  return keyObj
+}
 
 app.use(cors())
 
-// Circle webhook route: HMAC imzası ham body üzerinden doğrulandığı için
-// GLOBAL express.json()'DAN ÖNCE, kendi express.raw() middleware'i ile mount edilir.
-app.post("/webhooks/circle", express.raw({ type: "application/json" }), (req, res) => {
-  const secret = process.env.CIRCLE_WEBHOOK_SECRET
-  if (!secret) return res.status(503).json({ error: "Webhook not configured" })
+// Bazı Circle ürünleri webhook URL doğrulaması için HEAD isteği gönderir.
+app.head("/webhooks/circle", (_req, res) => res.status(200).end())
+
+// Circle webhook: imza ham body üzerinden ECDSA ile doğrulandığı için GLOBAL
+// express.json()'DAN ÖNCE, kendi express.raw() middleware'i ile mount edilir.
+app.post("/webhooks/circle", express.raw({ type: "application/json", limit: "1mb" }), async (req, res) => {
+  if (!CIRCLE_API_KEY) return res.status(503).json({ error: "CIRCLE_API_KEY not configured" })
+
+  const keyId = req.header("X-Circle-Key-Id") || req.header("x-circle-key-id")
+  const sigB64 = req.header("X-Circle-Signature") || req.header("x-circle-signature")
+  if (!keyId || !sigB64) return res.status(401).json({ error: "missing signature headers" })
 
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body ?? "")
-  // Circle standart imza header'ı; docs netleşince tek yerden değiştirilir.
-  const signature = req.get("X-Circle-Signature") || ""
-  const expected = crypto.createHmac("sha256", secret).update(rawBody).digest("hex")
 
-  const sigBuf = Buffer.from(signature)
-  const expBuf = Buffer.from(expected)
-  if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-    return res.status(401).json({ error: "Invalid signature" })
-  }
-
-  let payload
   try {
-    payload = JSON.parse(rawBody.toString("utf8"))
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON" })
+    const publicKey = await getCirclePublicKey(keyId)
+    const signature = Buffer.from(sigB64, "base64")
+    const isValid = crypto.verify("sha256", rawBody, publicKey, signature)
+    if (!isValid) return res.status(401).json({ error: "invalid signature" })
+
+    const payload = JSON.parse(rawBody.toString("utf8"))
+
+    // Şema kesin değil; kimlik/tip alanlarını savunmacı çıkar, tüm payload'ı sakla.
+    const id = payload.notificationId || payload.id || crypto.randomUUID()
+    const type = payload.notificationType || payload.type || "unknown"
+    const timestamp = payload.timestamp || new Date().toISOString()
+    const notification = payload.notification || payload
+    const contractAddress = notification.contractAddress || notification.address || VAULT_ADDRESS
+    const eventName = notification.eventName || notification.event || notification.name || "UnknownEvent"
+    const eventParams = notification.eventParams || notification.eventParameters || notification.args || {}
+
+    const activity = {
+      id,
+      type,
+      timestamp,
+      contractAddress,
+      eventName,
+      eventParams,
+      raw: payload,
+      receivedAt: new Date().toISOString(),
+    }
+
+    vaultActivityCache.unshift(activity)
+    if (vaultActivityCache.length > MAX_CACHE) vaultActivityCache.length = MAX_CACHE
+
+    console.log("[circle] event stored:", type, id)
+    return res.status(200).json({ received: true })
+  } catch (err) {
+    // Fetch/parse/key hataları → 500; imza doğrulama başarısızlığı yukarıda 401.
+    console.error("[circle] webhook error:", err.message)
+    return res.status(500).json({ error: "webhook processing failed" })
   }
-
-  // Circle payload şeması kesin değil; olası alan yollarını savunmacı biçimde tara.
-  const n = payload.notification || payload.event || payload
-  const eventName = n.eventName || n.event || n.name || payload.eventName || "UnknownEvent"
-  const contractAddress = n.contractAddress || n.address || payload.contractAddress || VAULT_ADDRESS
-  const block = n.blockHeight ?? n.blockNumber ?? n.block ?? payload.blockHeight ?? null
-  const txHash = n.txHash || n.transactionHash || payload.txHash || null
-  const rawArgs = n.args || n.eventParameters || n.params || {}
-
-  // Deposit/Withdraw için from/to/amount normalize et.
-  const from = rawArgs.from ?? rawArgs.sender ?? rawArgs.owner ?? null
-  const to = rawArgs.to ?? rawArgs.receiver ?? null
-  const amount = rawArgs.amount ?? rawArgs.assets ?? rawArgs.value ?? null
-
-  const activity = {
-    eventName,
-    contractAddress,
-    block,
-    txHash,
-    from,
-    to,
-    amount,
-    args: rawArgs,
-    receivedAt: new Date().toISOString(),
-  }
-
-  vaultActivityCache.unshift(activity)
-  if (vaultActivityCache.length > MAX_CACHE) vaultActivityCache.length = MAX_CACHE
-
-  console.log(`Circle webhook: ${eventName} @ ${block ?? "?"}`)
-  return res.status(200).json({ received: true })
 })
 
 app.get("/api/vault-activity", (_, res) => res.json({ events: vaultActivityCache }))
