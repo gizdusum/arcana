@@ -68,7 +68,7 @@ export const wagmiConfig = createConfig({
   connectors,
   chains: [arcTestnet],
   transports: {
-    [arcTestnet.id]: http('https://rpc.testnet.arc.network'),
+    [arcTestnet.id]: http('https://arc-testnet.drpc.org'),
   },
   ssr: true,
   storage: createStorage({
